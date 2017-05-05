@@ -52,9 +52,10 @@ import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
 import org.apache.tez.common.ContainerContext;
 import org.apache.tez.common.ContainerTask;
 import org.apache.tez.common.TezCommonUtils;
+import org.apache.tez.common.TezExecutors;
 import org.apache.tez.common.TezLocalResource;
+import org.apache.tez.common.TezSharedExecutor;
 import org.apache.tez.common.TezTaskUmbilicalProtocol;
-import org.apache.tez.common.TezUtils;
 import org.apache.tez.common.TezUtilsInternal;
 import org.apache.tez.common.counters.Limits;
 import org.apache.tez.common.security.JobTokenIdentifier;
@@ -66,11 +67,9 @@ import org.apache.tez.dag.api.records.DAGProtos;
 import org.apache.tez.dag.records.TezVertexID;
 import org.apache.tez.dag.utils.RelocalizationUtils;
 import org.apache.tez.hadoop.shim.HadoopShim;
-import org.apache.tez.hadoop.shim.HadoopShimProvider;
 import org.apache.tez.hadoop.shim.HadoopShimsLoader;
 import org.apache.tez.runtime.api.ExecutionContext;
 import org.apache.tez.runtime.api.impl.ExecutionContextImpl;
-import org.apache.tez.runtime.api.impl.TaskSpec;
 import org.apache.tez.runtime.common.objectregistry.ObjectRegistryImpl;
 import org.apache.tez.runtime.internals.api.TaskReporterInterface;
 import org.slf4j.Logger;
@@ -123,6 +122,7 @@ public class TezChild {
   private int taskCount = 0;
   private TezVertexID lastVertexID;
   private final HadoopShim hadoopShim;
+  private final TezExecutors sharedExecutor;
 
   public TezChild(Configuration conf, String host, int port, String containerIdentifier,
       String tokenIdentifier, int appAttemptNumber, String workingDir, String[] localDirs,
@@ -144,6 +144,7 @@ public class TezChild {
     this.user = user;
     this.updateSysCounters = updateSysCounters;
     this.hadoopShim = hadoopShim;
+    this.sharedExecutor = new TezSharedExecutor(defaultConf);
 
     getTaskMaxSleepTime = defaultConf.getInt(
         TezConfiguration.TEZ_TASK_GET_TASK_SLEEP_INTERVAL_MS_MAX,
@@ -261,7 +262,7 @@ public class TezChild {
             localDirs, containerTask.getTaskSpec(), appAttemptNumber,
             serviceConsumerMetadata, serviceProviderEnvMap, startedInputsMap, taskReporter,
             executor, objectRegistry, pid, executionContext, memAvailable, updateSysCounters,
-            hadoopShim);
+            hadoopShim, sharedExecutor);
         boolean shouldDie;
         try {
           TaskRunner2Result result = taskRunner.run();
@@ -462,6 +463,8 @@ public class TezChild {
     // for each and every task, and reading it back from disk. Also needs to be per vertex.
     Limits.setConfiguration(conf);
 
+    TezUtilsInternal.setSecurityUtilConfigration(LOG, conf);
+
     // singleton of ObjectRegistry for this JVM
     ObjectRegistryImpl objectRegistry = new ObjectRegistryImpl();
 
@@ -505,7 +508,7 @@ public class TezChild {
 
     // log the system properties
     if (LOG.isInfoEnabled()) {
-      String systemPropsToLog = TezUtils.getSystemPropertiesToLog(defaultConf);
+      String systemPropsToLog = TezCommonUtils.getSystemPropertiesToLog(defaultConf);
       if (systemPropsToLog != null) {
         LOG.info(systemPropsToLog);
       }

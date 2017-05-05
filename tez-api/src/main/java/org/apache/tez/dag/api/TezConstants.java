@@ -112,4 +112,22 @@ public class TezConstants {
   public static String getTezUberServicePluginName() {
     return TEZ_AM_SERVICE_PLUGIN_NAME_IN_AM;
   }
+
+  /**
+   * Minimum heartbeat timeout value for the Client to AM heartbeat.
+   */
+  public static final int TEZ_AM_CLIENT_HEARTBEAT_TIMEOUT_SECS_MINIMUM = 10;
+
+  /**
+   * Minimum polling interval used for the client-AM heartbeat.
+   */
+  public static final long TEZ_AM_CLIENT_HEARTBEAT_POLL_INTERVAL_MILLIS_MINIMUM = 1000;
+
+  /**
+   * For container JVM Xmx auto determination
+   */
+  public static final int TEZ_CONTAINER_SMALL_SLAB_BOUND_MB = 4096;
+  public static final double TEZ_CONTAINER_MAX_JAVA_HEAP_FRACTION_SMALL_SLAB = 0.7;
+  public static final double TEZ_CONTAINER_MAX_JAVA_HEAP_FRACTION_LARGE_SLAB = 0.8;
+
 }

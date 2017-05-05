@@ -19,6 +19,7 @@ package org.apache.tez.runtime.library.cartesianproduct;
 
 import org.apache.tez.dag.api.EdgeManagerPluginContext;
 import org.apache.tez.dag.api.EdgeManagerPluginOnDemand.EventRouteMetadata;
+import org.apache.tez.dag.api.EdgeManagerPluginOnDemand.CompositeEventRouteMetadata;
 import org.apache.tez.dag.api.UserPayload;
 import org.junit.Before;
 import org.junit.Test;
@@ -49,8 +50,8 @@ public class TestCartesianProductEdgeManagerPartitioned {
    */
   @Test(timeout = 5000)
   public void testTwoWay() throws Exception {
-    CartesianProductEdgeManagerConfig emConfig =
-      new CartesianProductEdgeManagerConfig(true, new String[]{"v0","v1"}, new int[]{3,4}, null, null);
+    CartesianProductEdgeManagerConfig emConfig = new CartesianProductEdgeManagerConfig(true,
+      new String[]{"v0","v1"}, new int[]{3,4}, null, 0, 0, null);
     when(mockContext.getDestinationVertexNumTasks()).thenReturn(12);
     testTwoWayV0(emConfig);
     testTwoWayV1(emConfig);
@@ -61,13 +62,13 @@ public class TestCartesianProductEdgeManagerPartitioned {
     when(mockContext.getSourceVertexNumTasks()).thenReturn(2);
     edgeManager.initialize(config);
 
-    EventRouteMetadata routingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
-    assertNotNull(routingData);
-    assertEquals(1, routingData.getNumEvents());
-    assertArrayEquals(new int[]{0}, routingData.getSourceIndices());
-    assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
+    CompositeEventRouteMetadata compositeRoutingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
+    assertNotNull(compositeRoutingData);
+    assertEquals(1, compositeRoutingData.getCount());
+    assertEquals(0, compositeRoutingData.getSource());
+    assertEquals(1, compositeRoutingData.getTarget());
 
-    routingData = edgeManager.routeDataMovementEventToDestination(1,0,1);
+    EventRouteMetadata routingData = edgeManager.routeDataMovementEventToDestination(1,0,1);
     assertNotNull(routingData);
     assertEquals(1, routingData.getNumEvents());
     assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
@@ -92,13 +93,13 @@ public class TestCartesianProductEdgeManagerPartitioned {
     when(mockContext.getSourceVertexNumTasks()).thenReturn(3);
     edgeManager.initialize(config);
 
-    EventRouteMetadata routingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
-    assertNotNull(routingData);
-    assertEquals(1, routingData.getNumEvents());
-    assertArrayEquals(new int[]{1}, routingData.getSourceIndices());
-    assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
+    CompositeEventRouteMetadata compositeRoutingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
+    assertNotNull(compositeRoutingData);
+    assertEquals(1, compositeRoutingData.getCount());
+    assertEquals(1, compositeRoutingData.getSource());
+    assertEquals(1, compositeRoutingData.getTarget());
 
-    routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
+    EventRouteMetadata routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
     assertNotNull(routingData);
     assertEquals(1, routingData.getNumEvents());
     assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
@@ -135,7 +136,7 @@ public class TestCartesianProductEdgeManagerPartitioned {
    * Vertex v0 has 2 tasks which generate 3 partitions
    * Vertex v1 has 3 tasks which generate 4 partitions
    */
-  @Test//(timeout = 5000)
+  @Test(timeout = 5000)
   public void testTwoWayWithFilter() throws Exception {
     ByteBuffer buffer = ByteBuffer.allocate(2);
     buffer.putChar('>');
@@ -143,9 +144,8 @@ public class TestCartesianProductEdgeManagerPartitioned {
     CartesianProductFilterDescriptor filterDescriptor =
       new CartesianProductFilterDescriptor(TestFilter.class.getName())
         .setUserPayload(UserPayload.create(buffer));
-    CartesianProductEdgeManagerConfig emConfig =
-      new CartesianProductEdgeManagerConfig(true, new String[]{"v0","v1"}, new int[]{3,4}, null,
-        filterDescriptor);
+    CartesianProductEdgeManagerConfig emConfig = new CartesianProductEdgeManagerConfig(true,
+      new String[]{"v0","v1"}, new int[]{3,4}, null, 0, 0, filterDescriptor);
     when(mockContext.getDestinationVertexNumTasks()).thenReturn(3);
     testTwoWayV0WithFilter(emConfig);
     testTwoWayV1WithFilter(emConfig);
@@ -156,13 +156,13 @@ public class TestCartesianProductEdgeManagerPartitioned {
     when(mockContext.getSourceVertexNumTasks()).thenReturn(2);
     edgeManager.initialize(config);
 
-    EventRouteMetadata routingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
-    assertNotNull(routingData);
-    assertEquals(1, routingData.getNumEvents());
-    assertArrayEquals(new int[]{2}, routingData.getSourceIndices());
-    assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
+    CompositeEventRouteMetadata compositeRoutingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
+    assertNotNull(compositeRoutingData);
+    assertEquals(1, compositeRoutingData.getCount());
+    assertEquals(2, compositeRoutingData.getSource());
+    assertEquals(1, compositeRoutingData.getTarget());
 
-    routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
+    EventRouteMetadata routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
     assertNotNull(routingData);
     assertEquals(1, routingData.getNumEvents());
     assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
@@ -179,13 +179,13 @@ public class TestCartesianProductEdgeManagerPartitioned {
     when(mockContext.getSourceVertexNumTasks()).thenReturn(3);
     edgeManager.initialize(config);
 
-    EventRouteMetadata routingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
-    assertNotNull(routingData);
-    assertEquals(1, routingData.getNumEvents());
-    assertArrayEquals(new int[]{0}, routingData.getSourceIndices());
-    assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
+    CompositeEventRouteMetadata compositeRoutingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
+    assertNotNull(compositeRoutingData);
+    assertEquals(1, compositeRoutingData.getCount());
+    assertEquals(0, compositeRoutingData.getSource());
+    assertEquals(1, compositeRoutingData.getTarget());
 
-    routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
+    EventRouteMetadata routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
     assertNotNull(routingData);
     assertEquals(1, routingData.getNumEvents());
     assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
@@ -204,8 +204,8 @@ public class TestCartesianProductEdgeManagerPartitioned {
    */
   @Test(timeout = 5000)
   public void testThreeWay() throws Exception {
-    CartesianProductEdgeManagerConfig emConfig =
-      new CartesianProductEdgeManagerConfig(true, new String[]{"v0","v1","v2"}, new int[]{4,3,2}, null, null);
+    CartesianProductEdgeManagerConfig emConfig = new CartesianProductEdgeManagerConfig(true,
+      new String[]{"v0","v1","v2"}, new int[]{4,3,2}, null, 0, 0, null);
     when(mockContext.getDestinationVertexNumTasks()).thenReturn(24);
     testThreeWayV0(emConfig);
     testThreeWayV1(emConfig);
@@ -218,13 +218,13 @@ public class TestCartesianProductEdgeManagerPartitioned {
     when(mockContext.getSourceVertexNumTasks()).thenReturn(2);
     edgeManager.initialize(config);
 
-    EventRouteMetadata routingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
-    assertNotNull(routingData);
-    assertEquals(1, routingData.getNumEvents());
-    assertArrayEquals(new int[]{0}, routingData.getSourceIndices());
-    assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
+    CompositeEventRouteMetadata compositeRoutingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
+    assertNotNull(compositeRoutingData);
+    assertEquals(1, compositeRoutingData.getCount());
+    assertEquals(0, compositeRoutingData.getSource());
+    assertEquals(1, compositeRoutingData.getTarget());
 
-    routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
+    EventRouteMetadata routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
     assertNotNull(routingData);
     assertEquals(1, routingData.getNumEvents());
     assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
@@ -241,13 +241,13 @@ public class TestCartesianProductEdgeManagerPartitioned {
     when(mockContext.getSourceVertexNumTasks()).thenReturn(3);
     edgeManager.initialize(config);
 
-    EventRouteMetadata routingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
-    assertNotNull(routingData);
-    assertEquals(1, routingData.getNumEvents());
-    assertArrayEquals(new int[]{0}, routingData.getSourceIndices());
-    assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
+    CompositeEventRouteMetadata compositeRoutingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
+    assertNotNull(compositeRoutingData);
+    assertEquals(1, compositeRoutingData.getCount());
+    assertEquals(0, compositeRoutingData.getSource());
+    assertEquals(1, compositeRoutingData.getTarget());
 
-    routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
+    EventRouteMetadata routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
     assertNotNull(routingData);
     assertEquals(1, routingData.getNumEvents());
     assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
@@ -264,13 +264,13 @@ public class TestCartesianProductEdgeManagerPartitioned {
     when(mockContext.getSourceVertexNumTasks()).thenReturn(4);
     edgeManager.initialize(config);
 
-    EventRouteMetadata routingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
-    assertNotNull(routingData);
-    assertEquals(1, routingData.getNumEvents());
-    assertArrayEquals(new int[]{1}, routingData.getSourceIndices());
-    assertArrayEquals(new int[]{1}, routingData.getTargetIndices());
+    CompositeEventRouteMetadata compositeRoutingData = edgeManager.routeCompositeDataMovementEventToDestination(1, 1);
+    assertNotNull(compositeRoutingData);
+    assertEquals(1, compositeRoutingData.getCount());
+    assertEquals(1, compositeRoutingData.getSource());
+    assertEquals(1, compositeRoutingData.getTarget());
 
-    routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
+    EventRouteMetadata routingData = edgeManager.routeInputSourceTaskFailedEventToDestination(1, 1);
     assertNotNull(routingData);
     assertEquals(1, routingData.getNumEvents());
     assertArrayEquals(new int[]{1}, routingData.getTargetIndices());

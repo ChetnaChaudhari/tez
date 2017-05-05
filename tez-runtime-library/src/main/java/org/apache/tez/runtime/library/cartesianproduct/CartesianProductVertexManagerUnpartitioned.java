@@ -17,9 +17,8 @@
  */
 package org.apache.tez.runtime.library.cartesianproduct;
 
-import com.google.common.base.Preconditions;
 import com.google.common.primitives.Ints;
-import org.apache.tez.dag.api.EdgeManagerPluginDescriptor;
+import com.google.protobuf.ByteString;
 import org.apache.tez.dag.api.EdgeProperty;
 import org.apache.tez.dag.api.UserPayload;
 import org.apache.tez.dag.api.VertexManagerPluginContext;
@@ -27,32 +26,155 @@ import org.apache.tez.dag.api.VertexManagerPluginContext.ScheduleTaskRequest;
 import org.apache.tez.dag.api.event.VertexState;
 import org.apache.tez.dag.api.event.VertexStateUpdate;
 import org.apache.tez.runtime.api.TaskAttemptIdentifier;
+import org.apache.tez.runtime.api.events.VertexManagerEvent;
+import org.apache.tez.runtime.library.shuffle.impl.ShuffleUserPayloads.VertexManagerEventPayloadProto;
+import org.apache.tez.runtime.library.utils.Grouper;
+import org.roaringbitmap.RoaringBitmap;
+import org.slf4j.Logger;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 
+import static org.apache.tez.dag.api.EdgeProperty.DataMovementType.CUSTOM;
 import static org.apache.tez.runtime.library.cartesianproduct.CartesianProductUserPayload.CartesianProductConfigProto;
 
+/**
+ * In unpartitioned case, we have one destination task for each source chunk combination. A source
+ * is a source vertex or a source vertex group. A chunk is one source task (without auto grouping)
+ * or a group of source tasks (with auto grouping). A chunk may contains multiple tasks across
+ * vertices. The mapping from source chunk to destination task id is done by
+ * {@link <CartesianProductCombination>}.
+ *
+ * If auto grouping is enabled, this vertex manager will estimate output size of each source and
+ * group source tasks of each source in chunk according to desired grouping size configured by user.
+ *
+ *
+ */
 class CartesianProductVertexManagerUnpartitioned extends CartesianProductVertexManagerReal {
-  List<String> sourceVertices;
-  private int parallelism = 1;
-  private boolean vertexStarted = false;
+  /**
+   * a cartesian product source
+   */
+  static class Source {
+    // list of source vertices of this source
+    List<SrcVertex> srcVertices = new ArrayList<>();
+    // position of this source in all sources
+    int position;
+    // name of source vertex or vertex group
+    String name;
+
+    // total number of chunks in this source
+    public int getNumChunk() {
+      int numChunk = 0;
+      for (SrcVertex srcV : srcVertices) {
+        numChunk += srcV.numChunk;
+      }
+      return numChunk;
+    }
+
+    // whether this source has any task completed
+    public boolean hasTaskCompleted() {
+      for (SrcVertex srcV : srcVertices) {
+        if (!srcV.taskCompleted.isEmpty()) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    public String toString(boolean afterReconfigure) {
+      StringBuilder sb = new StringBuilder();
+      sb.append("Source at position ");
+      sb.append(position);
+      if (name != null) {
+        sb.append(", ");
+        sb.append("vertex group ");
+        sb.append(name);
+
+      }
+      sb.append(": {");
+      for (SrcVertex srcV : srcVertices) {
+        sb.append("[");
+        sb.append(srcV.toString(afterReconfigure));
+        sb.append("], ");
+      }
+      sb.deleteCharAt(sb.length() - 1);
+      sb.setCharAt(sb.length() - 1, '}');
+      return sb.toString();
+    }
+  }
+
+  /**
+   * a cartesian product source vertex
+   */
+  class SrcVertex {
+    // which source this vertex belongs to
+    Source source;
+    // vertex name
+    String name;
+    int numTask;
+    // num chunks of this source vertex
+    int numChunk;
+    // offset of chunk id in vertex group
+    // we need sequence chunks in the vertex group to make them look like from single vertex
+    int chunkIdOffset = 0;
+    RoaringBitmap taskCompleted = new RoaringBitmap();
+    RoaringBitmap taskWithVMEvent = new RoaringBitmap();
+    long outputBytes;
+
+    public void doGrouping() {
+      numChunk = numTask;
+      if (config.enableAutoGrouping) {
+        outputBytes = outputBytes * numTask / taskWithVMEvent.getCardinality();
+        numChunk = Math.min(numChunk,
+          (int) ((outputBytes + config.desiredBytesPerChunk - 1) / config.desiredBytesPerChunk));
+      }
+    }
+
+    public String toString(boolean afterReconfigure) {
+      StringBuilder sb = new StringBuilder();
+      sb.append("vertex ").append(name).append(", ");
+      if (afterReconfigure) {
+        sb.append("estimated output ").append(outputBytes).append(" bytes, ");
+        sb.append(numChunk).append(" chunks");
+      } else {
+        sb.append(numTask).append(" tasks, ");
+        sb.append(taskWithVMEvent.getCardinality()).append(" VMEvents, ");
+        sb.append("output ").append(outputBytes).append(" bytes");
+      }
+      return sb.toString();
+    }
+  }
+
+  private static final Logger LOG =
+    org.slf4j.LoggerFactory.getLogger(CartesianProductVertexManagerUnpartitioned.class);
+
+  CartesianProductVertexManagerConfig config;
+  Map<String, Source> sourcesByName = new HashMap<>();
+  Map<String, SrcVertex> srcVerticesByName = new HashMap<>();
+
   private boolean vertexReconfigured = false;
-  private int numSourceVertexConfigured = 0;
-  private int[] numTasks;
-  private Queue<TaskAttemptIdentifier> pendingCompletedSrcTask = new LinkedList<>();
-  private Map<String, BitSet> sourceTaskCompleted = new HashMap<>();
-  private BitSet scheduledTasks = new BitSet();
-  private CartesianProductConfig config;
-  private int numSrcHasCompletedTask = 0;
+  private boolean vertexStarted = false;
+  private boolean vertexStartSchedule = false;
+  private int numCPSrcNotInConfigureState = 0;
+  private int numBroadcastSrcNotInRunningState = 0;
+  private Queue<TaskAttemptIdentifier> completedSrcTaskToProcess = new LinkedList<>();
+  private RoaringBitmap scheduledTasks = new RoaringBitmap();
+
+  /* auto reduce related */
+  // num of chunks of source at the corresponding position in source list
+  private int[] numChunksPerSrc;
+  private Set<String> vertexSentVME = new HashSet<>();
+  private Grouper grouper = new Grouper();
 
   public CartesianProductVertexManagerUnpartitioned(VertexManagerPluginContext context) {
     super(context);
@@ -60,117 +182,255 @@ class CartesianProductVertexManagerUnpartitioned extends CartesianProductVertexM
 
   @Override
   public void initialize(CartesianProductVertexManagerConfig config) throws Exception {
-    sourceVertices = config.getSourceVertices();
-    numTasks = new int[sourceVertices.size()];
-    for (String vertex : sourceVertices) {
-      sourceTaskCompleted.put(vertex, new BitSet());
+    for (Map.Entry<String, EdgeProperty> e : getContext().getInputVertexEdgeProperties().entrySet()) {
+      if (e.getValue().getDataMovementType() == CUSTOM
+        && e.getValue().getEdgeManagerDescriptor().getClassName()
+          .equals(CartesianProductEdgeManager.class.getName())) {
+        srcVerticesByName.put(e.getKey(), new SrcVertex());
+        srcVerticesByName.get(e.getKey()).name = e.getKey();
+        getContext().registerForVertexStateUpdates(e.getKey(), EnumSet.of(VertexState.CONFIGURED));
+        numCPSrcNotInConfigureState++;
+      } else {
+        getContext().registerForVertexStateUpdates(e.getKey(), EnumSet.of(VertexState.RUNNING));
+        numBroadcastSrcNotInRunningState++;
+      }
     }
-    for (String vertex : sourceVertices) {
-      getContext().registerForVertexStateUpdates(vertex, EnumSet.of(VertexState.CONFIGURED));
+
+    Map<String, List<String>> srcGroups = getContext().getInputVertexGroups();
+    for (int i = 0; i < config.getSourceVertices().size(); i++) {
+      String srcName = config.getSourceVertices().get(i);
+      Source source = new Source();
+      source.position = i;
+      if (srcGroups.containsKey(srcName)) {
+        source.name = srcName;
+        for (String srcVName : srcGroups.get(srcName)) {
+          source.srcVertices.add(srcVerticesByName.get(srcVName));
+          srcVerticesByName.get(srcVName).source = source;
+        }
+      } else {
+        source.srcVertices.add(srcVerticesByName.get(srcName));
+        srcVerticesByName.get(srcName).source = source;
+      }
+      sourcesByName.put(srcName, source);
     }
+
+    numChunksPerSrc = new int[sourcesByName.size()];
     this.config = config;
     getContext().vertexReconfigurationPlanned();
-  }
-
-  private void reconfigureVertex() throws IOException {
-    for (int numTask : numTasks) {
-      parallelism *= numTask;
-    }
-
-    UserPayload payload = null;
-    Map<String, EdgeProperty> edgeProperties = getContext().getInputVertexEdgeProperties();
-    for (EdgeProperty edgeProperty : edgeProperties.values()) {
-      EdgeManagerPluginDescriptor descriptor = edgeProperty.getEdgeManagerDescriptor();
-      if (payload == null) {
-        CartesianProductConfigProto.Builder builder = CartesianProductConfigProto.newBuilder();
-        builder.setIsPartitioned(false).addAllNumTasks(Ints.asList(numTasks))
-          .addAllSourceVertices(config.getSourceVertices());
-        payload = UserPayload.create(ByteBuffer.wrap(builder.build().toByteArray()));
-      }
-      descriptor.setUserPayload(payload);
-    }
-    getContext().reconfigureVertex(parallelism, null, edgeProperties);
-    vertexReconfigured = true;
-    getContext().doneReconfiguringVertex();
   }
 
   @Override
   public synchronized void onVertexStarted(List<TaskAttemptIdentifier> completions)
     throws Exception {
     vertexStarted = true;
-    // if vertex is already reconfigured, we can handle pending completions immediately
-    // otherwise we have to wait until vertex is reconfigured
-    if (vertexReconfigured) {
-      Preconditions.checkArgument(pendingCompletedSrcTask.size() == 0,
-        "Unexpected pending source completion on vertex start after vertex reconfiguration");
-      for (TaskAttemptIdentifier taId : completions) {
-        handleCompletedSrcTask(taId);
+    if (completions != null) {
+      for (TaskAttemptIdentifier attempt : completions) {
+        addCompletedSrcTaskToProcess(attempt);
       }
-    } else {
-      pendingCompletedSrcTask.addAll(completions);
     }
+    tryScheduleTasks();
   }
 
   @Override
   public synchronized void onVertexStateUpdated(VertexStateUpdate stateUpdate) throws IOException {
-    Preconditions.checkArgument(stateUpdate.getVertexState() == VertexState.CONFIGURED);
     String vertex = stateUpdate.getVertexName();
-    numTasks[sourceVertices.indexOf(vertex)] = getContext().getVertexNumTasks(vertex);
-    // reconfigure vertex when all source vertices are CONFIGURED
-    if (++numSourceVertexConfigured == sourceVertices.size()) {
-      reconfigureVertex();
-      // handle pending source completions when vertex is started and reconfigured
-      if (vertexStarted) {
-        while (!pendingCompletedSrcTask.isEmpty()) {
-          handleCompletedSrcTask(pendingCompletedSrcTask.poll());
-        }
-      }
+    VertexState state = stateUpdate.getVertexState();
+
+    if (state == VertexState.CONFIGURED) {
+      srcVerticesByName.get(vertex).numTask = getContext().getVertexNumTasks(vertex);
+      numCPSrcNotInConfigureState--;
+    } else if (state == VertexState.RUNNING) {
+      numBroadcastSrcNotInRunningState--;
     }
+    tryScheduleTasks();
   }
 
   @Override
   public synchronized void onSourceTaskCompleted(TaskAttemptIdentifier attempt) throws Exception {
-    if (numSourceVertexConfigured < sourceVertices.size()) {
-      pendingCompletedSrcTask.add(attempt);
-      return;
-    }
-    Preconditions.checkArgument(pendingCompletedSrcTask.size() == 0,
-      "Unexpected pending src completion on source task completed after vertex reconfiguration");
-    handleCompletedSrcTask(attempt);
+    addCompletedSrcTaskToProcess(attempt);
+    tryScheduleTasks();
   }
 
-  private void handleCompletedSrcTask(TaskAttemptIdentifier attempt) {
+  private void addCompletedSrcTaskToProcess(TaskAttemptIdentifier attempt) {
     int taskId = attempt.getTaskIdentifier().getIdentifier();
     String vertex = attempt.getTaskIdentifier().getVertexIdentifier().getName();
-    if (sourceTaskCompleted.get(vertex).get(taskId)) {
+    SrcVertex srcV = srcVerticesByName.get(vertex);
+    if (srcV != null && !srcV.taskCompleted.contains(taskId)) {
+      srcV.taskCompleted.add(taskId);
+      completedSrcTaskToProcess.add(attempt);
+    }
+  }
+
+  private boolean tryStartSchedule() {
+    if (!vertexReconfigured || !vertexStarted || numBroadcastSrcNotInRunningState > 0) {
+      return false;
+    }
+
+    for (Source src : sourcesByName.values()) {
+      if (!src.hasTaskCompleted()) {
+        return false;
+      }
+    }
+    vertexStartSchedule = true;
+    return true;
+  }
+
+  public synchronized void onVertexManagerEventReceived(VertexManagerEvent vmEvent)
+    throws IOException {
+    /* vmEvent after reconfigure doesn't matter */
+    if (vertexReconfigured) {
       return;
     }
 
-    if (sourceTaskCompleted.get(vertex).isEmpty()) {
-      numSrcHasCompletedTask++;
+    if (vmEvent.getUserPayload() != null) {
+      String srcVertex =
+        vmEvent.getProducerAttemptIdentifier().getTaskIdentifier().getVertexIdentifier().getName();
+      SrcVertex srcV = srcVerticesByName.get(srcVertex);
+
+      // vmEvent from non-cp vertex doesn't matter
+      if (srcV == null) {
+        return;
+      }
+
+      VertexManagerEventPayloadProto proto =
+        VertexManagerEventPayloadProto.parseFrom(ByteString.copyFrom(vmEvent.getUserPayload()));
+      srcV.outputBytes += proto.getOutputSize();
+      srcV.taskWithVMEvent.add(vmEvent.getProducerAttemptIdentifier().getTaskIdentifier().getIdentifier());
+      vertexSentVME.add(srcVertex);
     }
-    sourceTaskCompleted.get(vertex).set(taskId);
-    if (numSrcHasCompletedTask != sourceVertices.size()) {
+
+    tryScheduleTasks();
+  }
+
+  private boolean tryReconfigure() throws IOException {
+    if (numCPSrcNotInConfigureState > 0) {
+      return false;
+    }
+    if (config.enableAutoGrouping) {
+      if (vertexSentVME.size() != srcVerticesByName.size()) {
+        return false;
+      }
+      // every src v must output at least one chunk size
+      for (SrcVertex srcV : srcVerticesByName.values()) {
+        if (srcV.outputBytes < config.desiredBytesPerChunk
+          && srcV.taskWithVMEvent.getCardinality() < srcV.numTask) {
+          return false;
+        }
+      }
+    }
+
+    LOG.info("Start reconfigure, grouping: " + config.enableAutoGrouping
+      + ", chunk size: " + config.desiredBytesPerChunk + " bytes.");
+    for (String srcName : config.getSourceVertices()) {
+      LOG.info(sourcesByName.get(srcName).toString(false));
+    }
+
+    for (Source src : sourcesByName.values()) {
+      for (int i = 0; i < src.srcVertices.size(); i++) {
+        src.srcVertices.get(i).doGrouping();
+        if (i > 0) {
+          src.srcVertices.get(i).chunkIdOffset += src.srcVertices.get(i-1).numChunk;
+        }
+      }
+      numChunksPerSrc[src.position] = src.getNumChunk();
+    }
+
+    int parallelism = 1;
+    for (Source src : sourcesByName.values()) {
+      parallelism *= src.getNumChunk();
+    }
+
+    LOG.info("After reconfigure, ");
+    for (String srcName : config.getSourceVertices()) {
+      LOG.info(sourcesByName.get(srcName).toString(true));
+    }
+    LOG.info("Final parallelism: " + parallelism);
+
+    CartesianProductConfigProto.Builder builder = CartesianProductConfigProto.newBuilder();
+    for (int i = 0; i < numChunksPerSrc.length; i++) {
+      numChunksPerSrc[i] = sourcesByName.get(config.getSourceVertices().get(i)).getNumChunk();
+    }
+    builder.setIsPartitioned(false).addAllSources(config.getSourceVertices())
+      .addAllNumChunks(Ints.asList(this.numChunksPerSrc));
+
+    Map<String, EdgeProperty> edgeProperties = getContext().getInputVertexEdgeProperties();
+    Iterator<Map.Entry<String,EdgeProperty>> iter = edgeProperties.entrySet().iterator();
+    while (iter.hasNext()) {
+      Map.Entry<String, EdgeProperty> e = iter.next();
+      if (e.getValue().getDataMovementType() != CUSTOM) {
+        iter.remove();
+      } else {
+        SrcVertex srcV = srcVerticesByName.get(e.getKey());
+        builder.setNumChunk(srcV.numChunk).setChunkIdOffset(srcV.chunkIdOffset);
+        e.getValue().getEdgeManagerDescriptor()
+          .setUserPayload(UserPayload.create(ByteBuffer.wrap(builder.build().toByteArray())));
+      }
+    }
+    getContext().reconfigureVertex(parallelism, null, edgeProperties);
+    vertexReconfigured = true;
+    getContext().doneReconfiguringVertex();
+    return true;
+  }
+
+  private void tryScheduleTasks() throws IOException {
+    if (!vertexReconfigured && !tryReconfigure()) {
       return;
     }
+    if (!vertexStartSchedule && !tryStartSchedule()) {
+      return;
+    }
+
+    while (!completedSrcTaskToProcess.isEmpty()) {
+      scheduleTasksDependOnCompletion(completedSrcTaskToProcess.poll());
+    }
+  }
+
+  private void scheduleTasksDependOnCompletion(TaskAttemptIdentifier attempt) {
+    int taskId = attempt.getTaskIdentifier().getIdentifier();
+    String vertex = attempt.getTaskIdentifier().getVertexIdentifier().getName();
+    SrcVertex srcV = srcVerticesByName.get(vertex);
+    Source src = srcV.source;
 
     List<ScheduleTaskRequest> requests = new ArrayList<>();
-    CartesianProductCombination combination = new CartesianProductCombination(numTasks, sourceVertices.indexOf(vertex));
-    combination.firstTaskWithFixedPartition(taskId);
+    CartesianProductCombination combination =
+      new CartesianProductCombination(numChunksPerSrc, src.position);
+    grouper.init(srcV.numTask, srcV.numChunk);
+    combination.firstTaskWithFixedChunk(grouper.getGroupId(taskId) + srcV.chunkIdOffset);
     do {
       List<Integer> list = combination.getCombination();
+
+      if (scheduledTasks.contains(combination.getChunkId())) {
+        continue;
+      }
       boolean readyToSchedule = true;
       for (int i = 0; i < list.size(); i++) {
-        if (!sourceTaskCompleted.get(sourceVertices.get(i)).get(list.get(i))) {
-          readyToSchedule = false;
+        int chunkId = list.get(i);
+        SrcVertex srcVHasGroup = null;
+        for (SrcVertex v : sourcesByName.get(config.getSourceVertices().get(i)).srcVertices) {
+          if (v.chunkIdOffset <= chunkId && chunkId < v.chunkIdOffset + v.numChunk) {
+            srcVHasGroup = v;
+            break;
+          }
+        }
+        assert srcVHasGroup != null;
+        grouper.init(srcVHasGroup.numTask, srcVHasGroup.numChunk);
+        chunkId -= srcVHasGroup.chunkIdOffset;
+        for (int j = grouper.getFirstTaskInGroup(chunkId); j <= grouper.getLastTaskInGroup(chunkId); j++) {
+          if (!srcVHasGroup.taskCompleted.contains(j)) {
+            readyToSchedule = false;
+            break;
+          }
+        }
+        if (!readyToSchedule) {
           break;
         }
       }
-      if (readyToSchedule && !scheduledTasks.get(combination.getTaskId())) {
-        requests.add(ScheduleTaskRequest.create(combination.getTaskId(), null));
-        scheduledTasks.set(combination.getTaskId());
+
+      if (readyToSchedule) {
+        requests.add(ScheduleTaskRequest.create(combination.getChunkId(), null));
+        scheduledTasks.add(combination.getChunkId());
       }
-    } while (combination.nextTaskWithFixedPartition());
+    } while (combination.nextTaskWithFixedChunk());
     if (!requests.isEmpty()) {
       getContext().scheduleTasks(requests);
     }

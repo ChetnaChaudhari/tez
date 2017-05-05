@@ -45,6 +45,7 @@ import org.apache.tez.runtime.library.shuffle.impl.ShuffleUserPayloads.ShuffleEd
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
@@ -74,7 +75,7 @@ public class ShuffleVertexManager extends ShuffleVertexManagerBase {
 
   /**
    * Enables automatic parallelism determination for the vertex. Based on input data
-   * statisitics the parallelism is decreased to a desired level.
+   * statistics the parallelism is decreased to a desired level.
    */
   public static final String TEZ_SHUFFLE_VERTEX_MANAGER_ENABLE_AUTO_PARALLEL =
       "tez.shuffle-vertex-manager.enable.auto-parallel";
@@ -265,7 +266,6 @@ public class ShuffleVertexManager extends ShuffleVertexManagerBase {
           + sourceIndex % partitionRange;
       return EventRouteMetadata.create(1, new int[]{targetIndex});
     }
-    
 
     
     @Override
@@ -299,7 +299,7 @@ public class ShuffleVertexManager extends ShuffleVertexManagerBase {
     }
     
     @Override
-    public @Nullable EventRouteMetadata routeCompositeDataMovementEventToDestination(
+    public @Nullable CompositeEventRouteMetadata routeCompositeDataMovementEventToDestination(
         int sourceTaskIndex, int destinationTaskIndex)
         throws Exception {
       int[] targetIndicesToSend;
@@ -316,8 +316,8 @@ public class ShuffleVertexManager extends ShuffleVertexManagerBase {
         partitionRange = basePartitionRange;
       }
 
-      return EventRouteMetadata.create(partitionRange, targetIndicesToSend, 
-          sourceIndices[destinationTaskIndex]);
+      return CompositeEventRouteMetadata.create(partitionRange, targetIndicesToSend[0], 
+          sourceIndices[destinationTaskIndex][0]);
     }
 
     @Override
@@ -446,15 +446,8 @@ public class ShuffleVertexManager extends ShuffleVertexManagerBase {
     // Change this to use per partition stats for more accuracy TEZ-2962.
     // Instead of aggregating overall size and then dividing equally - coalesce partitions until
     // desired per partition size is achieved.
-    long expectedTotalSourceTasksOutputSize = 0;
-    for (Map.Entry<String, SourceVertexInfo> vInfo : getBipartiteInfo()) {
-      SourceVertexInfo srcInfo = vInfo.getValue();
-      if (srcInfo.numTasks > 0 && srcInfo.numVMEventsReceived > 0) {
-        // this assumes that 1 vmEvent is received per completed task - TEZ-2961
-        expectedTotalSourceTasksOutputSize +=
-            (srcInfo.numTasks * srcInfo.outputSize) / srcInfo.numVMEventsReceived;
-      }
-    }
+    BigInteger expectedTotalSourceTasksOutputSize =
+        getExpectedTotalBipartiteSourceTasksOutputSize();
 
     LOG.info("Expected output: {} based on actual output: {} from {} vertex " +
         "manager events. desiredTaskInputSize: {} max slow start tasks: {} " +
@@ -464,10 +457,20 @@ public class ShuffleVertexManager extends ShuffleVertexManagerBase {
         (totalNumBipartiteSourceTasks * config.getMaxFraction()),
         numBipartiteSourceTasksCompleted);
 
-    int desiredTaskParallelism =
-        (int)((expectedTotalSourceTasksOutputSize +
-            config.getDesiredTaskInputDataSize() - 1) /
-                config.getDesiredTaskInputDataSize());
+    // Calculate number of desired tasks by dividing with rounding up
+    BigInteger desiredTaskInputDataSize = BigInteger.valueOf(config.getDesiredTaskInputDataSize());
+    BigInteger desiredTaskInputDataSizeMinusOne = BigInteger.valueOf(config.getDesiredTaskInputDataSize() - 1);
+    BigInteger bigDesiredTaskParallelism =
+        expectedTotalSourceTasksOutputSize.add(desiredTaskInputDataSizeMinusOne).divide(desiredTaskInputDataSize);
+
+    if(bigDesiredTaskParallelism.compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0) {
+      LOG.info("Not reducing auto parallelism for vertex: {}"
+              + " since the desired parallelism of {} is greater than or equal"
+              + " to the max parallelism of {}", getContext().getVertexName(),
+          bigDesiredTaskParallelism, Integer.MAX_VALUE);
+      return null;
+    }
+    int desiredTaskParallelism = bigDesiredTaskParallelism.intValue();
     if(desiredTaskParallelism < mgrConfig.getMinTaskParallelism()) {
       desiredTaskParallelism = mgrConfig.getMinTaskParallelism();
     }
@@ -512,7 +515,13 @@ public class ShuffleVertexManager extends ShuffleVertexManagerBase {
     EdgeManagerPluginDescriptor descriptor =
         EdgeManagerPluginDescriptor.create(CustomShuffleEdgeManager.class.getName());
     descriptor.setUserPayload(edgeManagerConfig.toUserPayload());
-    ReconfigVertexParams params = new ReconfigVertexParams(finalTaskParallelism, null, descriptor);
+
+    Iterable<Map.Entry<String, SourceVertexInfo>> bipartiteItr = getBipartiteInfo();
+    for(Map.Entry<String, SourceVertexInfo> entry : bipartiteItr) {
+      entry.getValue().newDescriptor = descriptor;
+    }
+    ReconfigVertexParams params =
+        new ReconfigVertexParams(finalTaskParallelism, null);
     return params;
   }
 
@@ -608,19 +617,18 @@ public class ShuffleVertexManager extends ShuffleVertexManagerBase {
         Preconditions.checkState(index < targetIndexes.length,
             "index=" + index +", targetIndexes length=" + targetIndexes.length);
         int[] mapping = targetIndexes[index];
-        long totalStats = 0;
+        int partitionStats = 0;
         for (int i : mapping) {
-          totalStats += stats[i];
+          partitionStats += getCurrentlyKnownStatsAtIndex(i);
         }
-        computedPartitionSizes |= taskInfo.setInputStats(totalStats);
+        computedPartitionSizes |= taskInfo.setInputStats(partitionStats);
       } else {
-        computedPartitionSizes |= taskInfo.setInputStats(stats[index]);
+        computedPartitionSizes |= taskInfo.setInputStats(
+            getCurrentlyKnownStatsAtIndex(index));
       }
     }
     return computedPartitionSizes;
   }
-
-
 
 
 

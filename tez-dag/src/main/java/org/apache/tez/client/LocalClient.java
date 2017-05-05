@@ -147,6 +147,11 @@ public class LocalClient extends FrameworkClient {
   }
 
   @Override
+  public boolean isRunning() {
+    return true;
+  }
+
+  @Override
   public ApplicationReport getApplicationReport(ApplicationId appId) {
     ApplicationReport report = Records.newRecord(ApplicationReport.class);
     report.setApplicationId(appId);
@@ -319,8 +324,8 @@ public class LocalClient extends FrameworkClient {
                   new SystemClock(), appSubmitTime, isSession, userDir.toUri().getPath(),
                   new String[] {localDir.toUri().getPath()}, new String[] {logDir.toUri().getPath()},
                   amCredentials, UserGroupInformation.getCurrentUser().getShortUserName());
-          clientHandler = new DAGClientHandler(dagAppMaster);
           DAGAppMaster.initAndStartAppMaster(dagAppMaster, conf);
+          clientHandler = new DAGClientHandler(dagAppMaster);
 
         } catch (Throwable t) {
           LOG.error("Error starting DAGAppMaster", t);
@@ -357,7 +362,7 @@ public class LocalClient extends FrameworkClient {
 
     return new DAGAppMaster(applicationAttemptId, cId, currentHost, nmPort, nmHttpPort,
         new SystemClock(), appSubmitTime, isSession, userDir, localDirs, logDirs,
-        versionInfo.getVersion(), 1, credentials, jobUserName, amPluginDescriptorProto);
+        versionInfo.getVersion(), credentials, jobUserName, amPluginDescriptorProto);
   }
 
   private AMPluginDescriptorProto getPluginDescriptorInfo(Configuration conf,

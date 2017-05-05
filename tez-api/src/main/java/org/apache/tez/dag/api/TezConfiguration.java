@@ -20,7 +20,6 @@ package org.apache.tez.dag.api;
 
 import java.lang.reflect.Field;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -357,6 +356,10 @@ public class TezConfiguration extends Configuration {
    * actual allocation of memory to tasks the cluster. The value if used as a
    * fraction that is applied to the memory allocated Factor to size Xmx based
    * on container memory size. Value should be greater than 0 and less than 1.
+   *
+   * Set this value to -1 to allow Tez to use different default max heap fraction
+   * for different container memory size. Current policy is to use 0.7 for container
+   * smaller than 4GB and use 0.8 for larger container.
    */
   @ConfigurationScope(Scope.AM)
   @ConfigurationProperty(type="float")
@@ -606,7 +609,7 @@ public class TezConfiguration extends Configuration {
   @ConfigurationProperty(type="integer")
   public static final String TEZ_AM_CLIENT_THREAD_COUNT =
       TEZ_AM_PREFIX + "client.am.thread-count";
-  public static final int TEZ_AM_CLIENT_THREAD_COUNT_DEFAULT = 1;
+  public static final int TEZ_AM_CLIENT_THREAD_COUNT_DEFAULT = 2;
   
   /**
    * String value. Range of ports that the AM can use when binding for client connections. Leave blank
@@ -876,6 +879,36 @@ public class TezConfiguration extends Configuration {
   public static final String TEZ_TASK_SCALE_MEMORY_WEIGHTED_RATIOS =
       TEZ_TASK_PREFIX + "scale.memory.ratios";
 
+  /**
+   * Concurrent input/output memory allocation control. When enabled memory
+   * distributions assume that inputs and outputs will use their memory
+   * simultaneously. When disabled the distributions assume that outputs are not
+   * initialized until inputs release memory buffers, allowing inputs to
+   * leverage memory normally set aside for outputs and vice-versa.
+   * NOTE: This property currently is not supported by the ScalingAllocator
+   *       memory distributor.
+   */
+  @Private
+  @Unstable
+  @ConfigurationScope(Scope.VERTEX)
+  public static final String TEZ_TASK_SCALE_MEMORY_INPUT_OUTPUT_CONCURRENT =
+      TEZ_TASK_PREFIX + "scale.memory.input-output-concurrent";
+  public static final boolean TEZ_TASK_SCALE_MEMORY_INPUT_OUTPUT_CONCURRENT_DEFAULT = true;
+
+  /**
+   * Controls distributing output memory to inputs when non-concurrent I/O
+   * memory allocation is being used.  When enabled inputs will receive the
+   * same memory allocation as if concurrent I/O memory allocation were used.
+   * NOTE: This property currently is not supported by the ScalingAllocator
+   *       memory distributor.
+   */
+  @Private
+  @Unstable
+  @ConfigurationScope(Scope.VERTEX)
+  public static final String TEZ_TASK_SCALE_MEMORY_NON_CONCURRENT_INPUTS_ENABLED =
+      TEZ_TASK_PREFIX + "scale.memory.non-concurrent-inputs.enabled";
+  public static final boolean TEZ_TASK_SCALE_MEMORY_NON_CONCURRENT_INPUTS_ENABLED_DEFAULT = false;
+
   @Private
   @Unstable
   /**
@@ -994,7 +1027,15 @@ public class TezConfiguration extends Configuration {
   public static final String TEZ_AM_PREEMPTION_PERCENTAGE =
       TEZ_AM_PREFIX + "preemption.percentage";
   public static final int TEZ_AM_PREEMPTION_PERCENTAGE_DEFAULT = 10;
-  
+
+  /**
+   * Float value. Specifies the allowable percentage in the range 0.0-100.0f of task
+   * failures per vertex that will allow the vertex to succeed with failures.
+   */
+  @ConfigurationScope(Scope.VERTEX)
+  public static final String TEZ_VERTEX_FAILURES_MAXPERCENT =
+          "tez.vertex.failures.maxpercent";
+  public static final float TEZ_VERTEX_FAILURES_MAXPERCENT_DEFAULT = 0.0f;
   /**
    * Int value. The number of RM heartbeats to wait after preempting running tasks before preempting
    * more running tasks. After preempting a task, we need to wait at least 1 heartbeat so that the 
@@ -1117,6 +1158,19 @@ public class TezConfiguration extends Configuration {
       TEZ_PREFIX + "cluster.additional.classpath.prefix";
 
   /**
+   * Boolean value.
+   * If this value is true then tez explicitly adds hadoop conf directory into classpath for AM and
+   * task containers. Default is false.
+   */
+  @Private
+  @Unstable
+  @ConfigurationScope(Scope.CLIENT)
+  @ConfigurationProperty(type="boolean")
+  public static final String TEZ_CLASSPATH_ADD_HADOOP_CONF = TEZ_PREFIX +
+      "classpath.add-hadoop-conf";
+  public static final boolean TEZ_CLASSPATH_ADD_HADOOP_CONF_DEFAULT = false;
+
+  /**
    * Session-related properties
    */
   @Private
@@ -1139,7 +1193,8 @@ public class TezConfiguration extends Configuration {
 
   /**
    * Int value. Time (in seconds) for which the Tez AM should wait for a DAG to be submitted before
-   * shutting down. Only relevant in session mode.
+   * shutting down. Only relevant in session mode. Any negative value will disable this check and
+   * allow the AM to hang around forever in idle mode.
    */
   @ConfigurationScope(Scope.AM)
   @ConfigurationProperty(type="integer")
@@ -1254,6 +1309,17 @@ public class TezConfiguration extends Configuration {
       TEZ_PREFIX + "history.logging.log.level";
 
   /**
+   * List of comma separated enum values. Specifies the list of task attempt termination causes,
+   * which have to be suppressed from being logged to ATS. The valid filters are defined in the
+   * enum TaskAttemptTerminationCause. The filters are applied only if tez.history.logging.log.level
+   * is set to TASK_ATTEMPT.
+   */
+  @ConfigurationScope(Scope.DAG)
+  @ConfigurationProperty
+  public static final String TEZ_HISTORY_LOGGING_TASKATTEMPT_FILTERS =
+      TEZ_PREFIX + "history.logging.taskattempt-filters";
+
+  /**
    * Comma separated list of Integers. These are the values that were set for the config value
    * for {@value #TEZ_HISTORY_LOGGING_TIMELINE_NUM_DAGS_PER_GROUP}. The older values are required so
    * that the groupIds generated previously will continue to be generated by the plugin. If an older
@@ -1325,6 +1391,18 @@ public class TezConfiguration extends Configuration {
   public static final String YARN_ATS_MAX_EVENTS_PER_BATCH =
       TEZ_PREFIX + "yarn.ats.max.events.per.batch";
   public static final int YARN_ATS_MAX_EVENTS_PER_BATCH_DEFAULT = 5;
+
+  /**
+   * Boolean value. Default true.
+   * Whether to fix the history url if it has not been configured correctly i.e. it does not have a
+   * scheme in the value. By default, the url will be prepended with a scheme (http) if there is
+   * none present.
+   */
+  @Private
+  @ConfigurationScope(Scope.AM)
+  public static final String TEZ_AM_UI_HISTORY_URL_SCHEME_CHECK_ENABLED =
+      TEZ_PREFIX + "am.ui.history.url.scheme.check.enabled";
+  public static final boolean TEZ_AM_UI_HISTORY_URL_SCHEME_CHECK_ENABLED_DEFAULT = true;
 
 
   /**
@@ -1663,6 +1741,17 @@ public class TezConfiguration extends Configuration {
       TEZ_PREFIX + "am.ats.v15.override.summary-types";
   public static final boolean TEZ_AM_ATS_V15_OVERRIDE_SUMMARY_TYPES_DEFAULT = true;
 
+   /**
+    * Integer value in milliseconds. Default value is 5000 milliseconds.
+    * The time for which the AM waits after the final DAG completes or when shutdown is invoked
+    * before completing shutdown. This allows a client to retrieve any required info directly from
+    * the AM on completion of a DAG.
+    */
+   @Private
+   @ConfigurationScope(Scope.AM)
+   public static final String TEZ_AM_SLEEP_TIME_BEFORE_EXIT_MILLIS =
+       TEZ_AM_PREFIX + "sleep.time.before.exit.millis";
+
   /**
    * String value. Determines what JVM properties will be logged for debugging purposes
    * in the AM and Task runtime logs.
@@ -1676,5 +1765,47 @@ public class TezConfiguration extends Configuration {
           "os.name","os.version","java.home","java.runtime.version",
           "java.vendor","java.version","java.vm.name","java.class.path",
           "java.io.tmpdir","user.dir","user.name"));
+
+  /**
+   * Int value. Time interval (in seconds). If the Tez AM does not receive a heartbeat from the
+   * client within this time interval, it will kill any running DAG and shut down. Required to
+   * re-cycle orphaned Tez applications where the client is no longer alive. A negative value
+   * can be set to disable this check. For a positive value, the minimum value is 10 seconds.
+   * Values between 0 and 10 seconds will be reset to the minimum value.
+   * Only relevant in session mode.
+   * This is disabled by default i.e. by default, the Tez AM will go on to
+   * complete the DAG and only kill itself after hitting the DAG submission timeout defined by
+   * {@link #TEZ_SESSION_AM_DAG_SUBMIT_TIMEOUT_SECS}
+   */
+  @ConfigurationScope(Scope.AM)
+  @ConfigurationProperty(type="integer")
+  public static final String TEZ_AM_CLIENT_HEARTBEAT_TIMEOUT_SECS =
+      TEZ_PREFIX + "am.client.heartbeat.timeout.secs";
+  public static final int TEZ_AM_CLIENT_HEARTBEAT_TIMEOUT_SECS_DEFAULT = -1;
+
+
+  @Private
+  @ConfigurationScope(Scope.AM)
+  public static final String TEZ_AM_CLIENT_HEARTBEAT_POLL_INTERVAL_MILLIS =
+      TEZ_PREFIX + "am.client.heartbeat.poll.interval.millis";
+  public static final int TEZ_AM_CLIENT_HEARTBEAT_POLL_INTERVAL_MILLIS_DEFAULT = -1;
+
+  /**
+   * Int value. Minimum number of threads to be allocated by TezSharedExecutor.
+   */
+  @Private
+  @ConfigurationScope(Scope.AM)
+  public static final String TEZ_SHARED_EXECUTOR_MIN_THREADS = "tez.shared-executor.min-threads";
+  public static final int TEZ_SHARED_EXECUTOR_MIN_THREADS_DEFAULT = 0;
+
+  /**
+   * Int value. Maximum number of threads to be allocated by TezSharedExecutor. If value is negative
+   * then Integer.MAX_VALUE is used as the limit.
+   * Default: Integer.MAX_VALUE.
+   */
+  @Private
+  @ConfigurationScope(Scope.AM)
+  public static final String TEZ_SHARED_EXECUTOR_MAX_THREADS = "tez.shared-executor.max-threads";
+  public static final int TEZ_SHARED_EXECUTOR_MAX_THREADS_DEFAULT = -1;
 
 }

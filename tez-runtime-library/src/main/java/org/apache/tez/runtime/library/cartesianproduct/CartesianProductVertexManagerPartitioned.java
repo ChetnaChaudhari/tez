@@ -17,7 +17,6 @@
  */
 package org.apache.tez.runtime.library.cartesianproduct;
 
-import com.google.common.base.Preconditions;
 import com.google.common.primitives.Ints;
 import org.apache.tez.common.ReflectionUtils;
 import org.apache.tez.dag.api.TezReflectionException;
@@ -27,6 +26,7 @@ import org.apache.tez.dag.api.VertexManagerPluginContext.ScheduleTaskRequest;
 import org.apache.tez.dag.api.event.VertexState;
 import org.apache.tez.dag.api.event.VertexStateUpdate;
 import org.apache.tez.runtime.api.TaskAttemptIdentifier;
+import org.apache.tez.runtime.api.events.VertexManagerEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,7 +48,9 @@ class CartesianProductVertexManagerPartitioned extends CartesianProductVertexMan
   private int parallelism = 0;
   private boolean vertexStarted = false;
   private boolean vertexReconfigured = false;
-  private int numSourceVertexConfigured = 0;
+  private int numCPSrcNotInConfiguredState = 0;
+  private int numBroadcastSrcNotInRunningState = 0;
+
   private CartesianProductFilter filter;
   private Map<String, BitSet> sourceTaskCompleted = new HashMap<>();
   private int numFinishedSrcTasks = 0;
@@ -78,10 +80,66 @@ class CartesianProductVertexManagerPartitioned extends CartesianProductVertexMan
     for (String sourceVertex : sourceVertices) {
       sourceTaskCompleted.put(sourceVertex, new BitSet());
     }
-    for (String vertex : sourceVertices) {
-      getContext().registerForVertexStateUpdates(vertex, EnumSet.of(VertexState.CONFIGURED));
+    for (String vertex : getContext().getInputVertexEdgeProperties().keySet()) {
+      if (sourceVertices.indexOf(vertex) != -1) {
+        getContext().registerForVertexStateUpdates(vertex, EnumSet.of(VertexState.CONFIGURED));
+        numCPSrcNotInConfiguredState++;
+      } else {
+        getContext().registerForVertexStateUpdates(vertex, EnumSet.of(VertexState.RUNNING));
+        numBroadcastSrcNotInRunningState++;
+      }
     }
     getContext().vertexReconfigurationPlanned();
+  }
+
+  @Override
+  public void onVertexManagerEventReceived(VertexManagerEvent vmEvent) throws IOException {}
+
+  @Override
+  public synchronized void onVertexStarted(List<TaskAttemptIdentifier> completions)
+    throws Exception {
+    vertexStarted = true;
+    if (completions != null) {
+      for (TaskAttemptIdentifier attempt : completions) {
+        onSourceTaskCompleted(attempt);
+      }
+    }
+    // try schedule because there may be no more vertex state update and source completions
+    tryScheduleTask();
+  }
+
+  @Override
+  public synchronized void onVertexStateUpdated(VertexStateUpdate stateUpdate) throws IOException{
+    VertexState state = stateUpdate.getVertexState();
+
+    if (state == VertexState.CONFIGURED) {
+      if (!vertexReconfigured) {
+        reconfigureVertex();
+      }
+      numCPSrcNotInConfiguredState--;
+      totalNumSrcTasks += getContext().getVertexNumTasks(stateUpdate.getVertexName());
+    } else if (state == VertexState.RUNNING){
+      numBroadcastSrcNotInRunningState--;
+    }
+    // try schedule because there may be no more vertex start and source completions
+    tryScheduleTask();
+  }
+
+  @Override
+  public synchronized void onSourceTaskCompleted(TaskAttemptIdentifier attempt) throws Exception {
+    int taskId = attempt.getTaskIdentifier().getIdentifier();
+    String vertex = attempt.getTaskIdentifier().getVertexIdentifier().getName();
+
+    if (!sourceTaskCompleted.containsKey(vertex)) {
+      return;
+    }
+
+    BitSet bitSet = this.sourceTaskCompleted.get(vertex);
+    if (!bitSet.get(taskId)) {
+      bitSet.set(taskId);
+      numFinishedSrcTasks++;
+      tryScheduleTask();
+    }
   }
 
   private void reconfigureVertex() throws IOException {
@@ -105,61 +163,23 @@ class CartesianProductVertexManagerPartitioned extends CartesianProductVertexMan
     getContext().doneReconfiguringVertex();
   }
 
-  @Override
-  public synchronized void onVertexStarted(List<TaskAttemptIdentifier> completions)
-    throws Exception {
-    vertexStarted = true;
-    if (completions != null) {
-      for (TaskAttemptIdentifier attempt : completions) {
-        onSourceTaskCompleted(attempt);
-      }
-    }
-    // try schedule because there may be no more vertex state update and source completions
-    tryScheduleTask();
-  }
-
-  @Override
-  public synchronized void onVertexStateUpdated(VertexStateUpdate stateUpdate) throws IOException{
-    Preconditions.checkArgument(stateUpdate.getVertexState() == VertexState.CONFIGURED);
-    if (!vertexReconfigured) {
-      reconfigureVertex();
-    }
-    numSourceVertexConfigured++;
-    totalNumSrcTasks += getContext().getVertexNumTasks(stateUpdate.getVertexName());
-    // try schedule because there may be no more vertex start and source completions
-    tryScheduleTask();
-  }
-
-  @Override
-  public synchronized void onSourceTaskCompleted(TaskAttemptIdentifier attempt) throws Exception {
-    int taskId = attempt.getTaskIdentifier().getIdentifier();
-    String vertex = attempt.getTaskIdentifier().getVertexIdentifier().getName();
-    BitSet bitSet = this.sourceTaskCompleted.get(vertex);
-    if (!bitSet.get(taskId)) {
-      bitSet.set(taskId);
-      numFinishedSrcTasks++;
-      tryScheduleTask();
-    }
-  }
-
   /**
    * schedule task as the ascending order of id. Slow start has same behavior as ShuffleVertexManager
    */
   private void tryScheduleTask() {
     // only schedule task when vertex is already started and all source vertices are configured
-    if (!vertexStarted
-      || numSourceVertexConfigured != sourceVertices.size()) {
+    if (!vertexStarted || numCPSrcNotInConfiguredState > 0 || numBroadcastSrcNotInRunningState > 0) {
       return;
     }
     // determine the destination task with largest id to schedule
     float percentFinishedSrcTask = numFinishedSrcTasks*1f/totalNumSrcTasks;
     int numTaskToSchedule;
-    if (percentFinishedSrcTask < config.getMinFraction()) {
+    if (percentFinishedSrcTask < config.minFraction) {
       numTaskToSchedule = 0;
-    } else if (config.getMinFraction() <= percentFinishedSrcTask &&
-        percentFinishedSrcTask <= config.getMaxFraction()) {
-      numTaskToSchedule = (int) ((percentFinishedSrcTask-config.getMinFraction())
-        /(config.getMaxFraction()-config.getMinFraction())*parallelism);
+    } else if (config.minFraction <= percentFinishedSrcTask &&
+        percentFinishedSrcTask <= config.maxFraction) {
+      numTaskToSchedule = (int) ((percentFinishedSrcTask-config.minFraction)
+        /(config.maxFraction-config.minFraction)*parallelism);
     } else {
       numTaskToSchedule = parallelism;
     }

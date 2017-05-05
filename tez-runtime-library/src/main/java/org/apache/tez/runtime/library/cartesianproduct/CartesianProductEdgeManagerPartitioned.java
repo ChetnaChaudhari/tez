@@ -21,6 +21,7 @@ import com.google.common.primitives.Ints;
 import org.apache.tez.common.ReflectionUtils;
 import org.apache.tez.dag.api.EdgeManagerPluginContext;
 import org.apache.tez.dag.api.EdgeManagerPluginOnDemand.EventRouteMetadata;
+import org.apache.tez.dag.api.EdgeManagerPluginOnDemand.CompositeEventRouteMetadata;
 import org.apache.tez.dag.api.UserPayload;
 
 import javax.annotation.Nullable;
@@ -69,12 +70,12 @@ class CartesianProductEdgeManagerPartitioned extends CartesianProductEdgeManager
 
   @Nullable
   @Override
-  public EventRouteMetadata routeCompositeDataMovementEventToDestination(int srcTaskId,
+  public CompositeEventRouteMetadata routeCompositeDataMovementEventToDestination(int srcTaskId,
                                                                          int destTaskId)
     throws Exception {
     int partition = CartesianProductCombination.fromTaskId(numPartitions,
       getIdealTaskId(destTaskId)).getCombination().get(positionId);
-    return EventRouteMetadata.create(1, new int[]{srcTaskId}, new int[]{partition});
+    return CompositeEventRouteMetadata.create(1, srcTaskId, partition);
   }
 
   @Nullable
@@ -106,13 +107,13 @@ class CartesianProductEdgeManagerPartitioned extends CartesianProductEdgeManager
     CartesianProductCombination combination =
       new CartesianProductCombination(numPartitions);
     combination.firstTask();
-    List<String> sourceVertices = config.getSourceVertices();
+    List<String> sources = config.getSourceVertices();
     do {
-      for (int i = 0; i < sourceVertices.size(); i++) {
-        vertexPartitionMap.put(sourceVertices.get(i), combination.getCombination().get(i));
+      for (int i = 0; i < sources.size(); i++) {
+        vertexPartitionMap.put(sources.get(i), combination.getCombination().get(i));
       }
       if (filter == null || filter.isValidCombination(vertexPartitionMap)) {
-        idealTaskId.add(combination.getTaskId());
+        idealTaskId.add(combination.getChunkId());
       }
     } while (combination.nextTask());
     this.taskIdMapping = Ints.toArray(idealTaskId);

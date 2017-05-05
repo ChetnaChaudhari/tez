@@ -18,57 +18,76 @@
 package org.apache.tez.runtime.library.cartesianproduct;
 
 import org.apache.tez.dag.api.EdgeManagerPluginContext;
-import org.apache.tez.dag.api.EdgeManagerPluginOnDemand;
+import org.apache.tez.dag.api.EdgeManagerPluginOnDemand.CompositeEventRouteMetadata;
+import org.apache.tez.dag.api.EdgeManagerPluginOnDemand.EventRouteMetadata;
+import org.apache.tez.runtime.library.utils.Grouper;
 
 import javax.annotation.Nullable;
-import java.util.Arrays;
 
-import static org.apache.tez.dag.api.EdgeManagerPluginOnDemand.*;
 
 class CartesianProductEdgeManagerUnpartitioned extends CartesianProductEdgeManagerReal {
   private int positionId;
-  private int[] numTasks;
+  private int numChunk;
+  private int chunkIdOffset;
+  private int[] numChunkPerSrc;
   private int numDestinationConsumerTasks;
+  private Grouper grouper = new Grouper();
 
   public CartesianProductEdgeManagerUnpartitioned(EdgeManagerPluginContext context) {
     super(context);
   }
 
   public void initialize(CartesianProductEdgeManagerConfig config) {
-    positionId = config.getSourceVertices().indexOf(getContext().getSourceVertexName());
-    this.numTasks = config.getNumTasks();
+    String groupName = getContext().getVertexGroupName();
+    String srcName = groupName != null ? groupName : getContext().getSourceVertexName();
+    this.positionId = config.getSourceVertices().indexOf(srcName);
+    this.numChunkPerSrc = config.numChunksPerSrc;
+    this.numChunk = config.numChunk;
+    this.chunkIdOffset = config.chunkIdOffset;
 
-    if (numTasks != null && numTasks[positionId] != 0) {
+    if (numChunk != 0) {
+      grouper.init(getContext().getSourceVertexNumTasks(), numChunk);
       numDestinationConsumerTasks = 1;
-      for (int numTask : numTasks) {
-        numDestinationConsumerTasks *= numTask;
+      for (int numGroup : numChunkPerSrc) {
+        numDestinationConsumerTasks *= numGroup;
       }
-      numDestinationConsumerTasks /= numTasks[positionId];
+      numDestinationConsumerTasks /= numChunkPerSrc[positionId];
     }
   }
 
   @Override
   public int routeInputErrorEventToSource(int destTaskId, int failedInputId) throws Exception {
-    return
-      CartesianProductCombination.fromTaskId(numTasks, destTaskId).getCombination().get(positionId);
+    return failedInputId + grouper.getFirstTaskInGroup(
+      CartesianProductCombination.fromTaskId(numChunkPerSrc, destTaskId).getCombination().get(positionId)
+        - chunkIdOffset);
   }
 
   @Override
   public EventRouteMetadata routeDataMovementEventToDestination(int srcTaskId, int srcOutputId,
                                                                 int destTaskId) throws Exception {
-    int index = CartesianProductCombination.fromTaskId(numTasks, destTaskId)
-      .getCombination().get(positionId);
-    return index == srcTaskId ? EventRouteMetadata.create(1, new int[]{0}) : null;
+    int chunkId =
+      CartesianProductCombination.fromTaskId(numChunkPerSrc, destTaskId).getCombination().get(positionId)
+        - chunkIdOffset;
+    if (0 <= chunkId && chunkId < numChunk && grouper.isInGroup(srcTaskId, chunkId)) {
+      int idx = srcTaskId - grouper.getFirstTaskInGroup(chunkId);
+      return EventRouteMetadata.create(1, new int[] {idx});
+    }
+    return null;
   }
 
   @Nullable
   @Override
-  public EventRouteMetadata routeCompositeDataMovementEventToDestination(int srcTaskId,
-                                                                         int destTaskId)
+  public CompositeEventRouteMetadata routeCompositeDataMovementEventToDestination(int srcTaskId,
+                                                                                  int destTaskId)
     throws Exception {
-    int index = CartesianProductCombination.fromTaskId(numTasks, destTaskId)
-        .getCombination().get(positionId);
-    return index == srcTaskId ? EventRouteMetadata.create(1, new int[]{0}, new int[]{0}) : null;
+    int chunkId =
+      CartesianProductCombination.fromTaskId(numChunkPerSrc, destTaskId).getCombination().get(positionId)
+        - chunkIdOffset;
+    if (0 <= chunkId && chunkId < numChunk && grouper.isInGroup(srcTaskId, chunkId)) {
+      int idx = srcTaskId - grouper.getFirstTaskInGroup(chunkId);
+      return CompositeEventRouteMetadata.create(1, idx, 0);
+    }
+    return null;
   }
 
   @Nullable
@@ -76,14 +95,22 @@ class CartesianProductEdgeManagerUnpartitioned extends CartesianProductEdgeManag
   public EventRouteMetadata routeInputSourceTaskFailedEventToDestination(int srcTaskId,
                                                                          int destTaskId)
     throws Exception {
-    int index = CartesianProductCombination.fromTaskId(numTasks, destTaskId)
-      .getCombination().get(positionId);
-    return index == srcTaskId ? EventRouteMetadata.create(1, new int[]{0}) : null;
+    int chunkId =
+      CartesianProductCombination.fromTaskId(numChunkPerSrc, destTaskId).getCombination().get(positionId)
+        - chunkIdOffset;
+    if (0 <= chunkId && chunkId < numChunk && grouper.isInGroup(srcTaskId, chunkId)) {
+      int idx = srcTaskId - grouper.getFirstTaskInGroup(chunkId);
+      return EventRouteMetadata.create(1, new int[] {idx});
+    }
+    return null;
   }
 
   @Override
   public int getNumDestinationTaskPhysicalInputs(int destTaskId) {
-    return 1;
+    int chunkId =
+      CartesianProductCombination.fromTaskId(numChunkPerSrc, destTaskId).getCombination().get(positionId)
+        - chunkIdOffset;
+    return 0 <= chunkId && chunkId < numChunk ? grouper.getNumTasksInGroup(chunkId) : 0;
   }
 
   @Override
