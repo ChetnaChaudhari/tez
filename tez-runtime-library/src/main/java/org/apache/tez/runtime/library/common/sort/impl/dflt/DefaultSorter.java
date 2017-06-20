@@ -32,6 +32,7 @@ import java.util.zip.Deflater;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import org.apache.commons.lang.exception.ExceptionUtils;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.runtime.library.api.IOInterruptedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -77,7 +78,7 @@ public final class DefaultSorter extends ExternalSorter implements IndexedSortab
   private final static int APPROX_HEADER_LENGTH = 150;
 
   // k/v accounting
-  private final IntBuffer kvmeta; // metadata overlay on backing store
+  private IntBuffer kvmeta; // metadata overlay on backing store
   int kvstart;            // marks origin of spill metadata
   int kvend;              // marks end of spill metadata
   int kvindex;            // marks end of fully serialized records
@@ -90,7 +91,7 @@ public final class DefaultSorter extends ExternalSorter implements IndexedSortab
   int bufvoid;            // marks the point where we should stop
                           // reading at the end of the buffer
 
-  private final byte[] kvbuffer;        // main output buffer
+  private byte[] kvbuffer;        // main output buffer
   private final byte[] b0 = new byte[0];
 
   protected static final int VALSTART = 0;         // val offset in acct
@@ -115,6 +116,7 @@ public final class DefaultSorter extends ExternalSorter implements IndexedSortab
   volatile boolean spillThreadRunning = false;
   final SpillThread spillThread = new SpillThread();
   private final Deflater deflater;
+  private final String auxiliaryService;
 
   final ArrayList<TezSpillRecord> indexCacheList =
     new ArrayList<TezSpillRecord>();
@@ -153,6 +155,8 @@ public final class DefaultSorter extends ExternalSorter implements IndexedSortab
           TezRuntimeConfiguration.TEZ_RUNTIME_PIPELINED_SHUFFLE_ENABLED + " does not work "
           + "with DefaultSorter. It is supported only with PipelinedSorter.");
     }
+    auxiliaryService = conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
 
     // buffers and accounting
     int maxMemUsage = sortmb << 20;
@@ -745,6 +749,16 @@ public final class DefaultSorter extends ExternalSorter implements IndexedSortab
     }
   }
 
+  @Override
+  public void close() throws IOException {
+    super.close();
+    kvbuffer = null;
+    kvmeta = null;
+  }
+
+  boolean isClosed() {
+    return kvbuffer == null && kvmeta == null;
+  }
 
   protected class SpillThread extends Thread {
 
@@ -1137,7 +1151,7 @@ public final class DefaultSorter extends ExternalSorter implements IndexedSortab
     String pathComponent = (outputContext.getUniqueIdentifier() + "_" + index);
     ShuffleUtils.generateEventOnSpill(events, isFinalMergeEnabled(), isLastEvent,
         outputContext, index, spillRecord, partitions, sendEmptyPartitionDetails, pathComponent,
-        partitionStats, reportDetailedPartitionStats(), deflater);
+        partitionStats, reportDetailedPartitionStats(), auxiliaryService, deflater);
 
     LOG.info(outputContext.getDestinationVertexName() + ": " +
         "Adding spill event for spill (final update=" + isLastEvent + "), spillId=" + index);

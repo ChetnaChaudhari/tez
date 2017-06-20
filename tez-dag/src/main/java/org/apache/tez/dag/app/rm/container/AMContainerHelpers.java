@@ -91,10 +91,11 @@ public class AMContainerHelpers {
    * Create the common {@link ContainerLaunchContext} for all attempts.
    *
    * @param applicationACLs
+   * @param auxiliaryService
    */
   private static ContainerLaunchContext createCommonContainerLaunchContext(
       Map<ApplicationAccessType, String> applicationACLs,
-      Credentials credentials) {
+      Credentials credentials, String auxiliaryService) {
 
     // Application environment
     Map<String, String> environment = new HashMap<String, String>();
@@ -128,7 +129,7 @@ public class AMContainerHelpers {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Putting shuffle token in serviceData in common CLC");
       }
-      serviceData.put(TezConstants.TEZ_SHUFFLE_HANDLER_SERVICE_ID,
+      serviceData.put(auxiliaryService,
           TezCommonUtils.serializeServiceData(TokenCache.getSessionToken(containerCredentials)));
     } catch (IOException e) {
       throw new TezUncheckedException(e);
@@ -152,13 +153,13 @@ public class AMContainerHelpers {
       String javaOpts,
       InetSocketAddress taskAttemptListenerAddress, Credentials credentials,
       AppContext appContext, Resource containerResource,
-      Configuration conf) {
+      Configuration conf, String auxiliaryService) {
 
     ContainerLaunchContext commonContainerSpec = null;
     synchronized (commonContainerSpecLock) {
       if (!commonContainerSpecs.containsKey(tezDAGID)) {
         commonContainerSpec =
-            createCommonContainerLaunchContext(acls, credentials);
+            createCommonContainerLaunchContext(acls, credentials, auxiliaryService);
         commonContainerSpecs.put(tezDAGID, commonContainerSpec);
       } else {
         commonContainerSpec = commonContainerSpecs.get(tezDAGID);

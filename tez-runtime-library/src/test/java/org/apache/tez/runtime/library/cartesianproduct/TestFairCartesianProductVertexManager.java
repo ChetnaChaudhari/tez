@@ -80,7 +80,7 @@ public class TestFairCartesianProductVertexManager {
   /**
    * v0 and v1 are two cartesian product sources
    */
-  private void setupDAGVertexOnly(int maxParallelism, long minOpsPerWorker,
+  private void setupDAGVertexOnly(int maxParallelism, long minOpsPerWorker, int numPartition,
                                   int srcParallelismMultiplier) throws Exception {
     when(ctx.getInputVertexEdgeProperties()).thenReturn(getEdgePropertyMap(2));
     setSrcParallelism(ctx, srcParallelismMultiplier, 2, 3);
@@ -88,7 +88,7 @@ public class TestFairCartesianProductVertexManager {
     CartesianProductConfigProto.Builder builder = CartesianProductConfigProto.newBuilder();
     builder.setIsPartitioned(false).addSources("v0").addSources("v1")
       .setMaxParallelism(maxParallelism).setMinOpsPerWorker(minOpsPerWorker)
-      .setNumPartitionsForFairCase(maxParallelism);
+      .setNumPartitionsForFairCase(numPartition);
     vertexManager.initialize(builder.build());
   }
 
@@ -218,7 +218,7 @@ public class TestFairCartesianProductVertexManager {
 
   @Test(timeout = 5000)
   public void testDAGVertexOnlyGroupByMaxParallelism() throws Exception {
-    setupDAGVertexOnly(30, 1, 1);
+    setupDAGVertexOnly(30, 1, 30, 1);
     vertexManager.onVertexStateUpdated(new VertexStateUpdate("v0", VertexState.CONFIGURED));
     vertexManager.onVertexStateUpdated(new VertexStateUpdate("v1", VertexState.CONFIGURED));
 
@@ -246,7 +246,7 @@ public class TestFairCartesianProductVertexManager {
 
   @Test(timeout = 5000)
   public void testDAGVertexOnlyGroupByMinOpsPerWorker() throws Exception {
-    setupDAGVertexOnly(100, 10000, 10);
+    setupDAGVertexOnly(100, 10000, 10, 10);
     vertexManager.onVertexStateUpdated(new VertexStateUpdate("v0", VertexState.CONFIGURED));
     vertexManager.onVertexStateUpdated(new VertexStateUpdate("v1", VertexState.CONFIGURED));
 
@@ -366,7 +366,7 @@ public class TestFairCartesianProductVertexManager {
 
   @Test(timeout = 5000)
   public void testOnVertexStart() throws Exception {
-    setupDAGVertexOnly(6, 1, 1);
+    setupDAGVertexOnly(6, 1, 6, 1);
     vertexManager.onVertexStateUpdated(new VertexStateUpdate("v0", VertexState.CONFIGURED));
     vertexManager.onVertexStateUpdated(new VertexStateUpdate("v1", VertexState.CONFIGURED));
     vertexManager.onVertexManagerEventReceived(getVMEvent(100, "v0", 0));
@@ -467,7 +467,7 @@ public class TestFairCartesianProductVertexManager {
 
   @Test(timeout = 5000)
   public void testZeroSrcOutput() throws Exception {
-    setupDAGVertexOnly(10, 1, 1);
+    setupDAGVertexOnly(10, 1, 10, 1);
     vertexManager.onVertexStateUpdated(new VertexStateUpdate("v0", VertexState.CONFIGURED));
     vertexManager.onVertexStateUpdated(new VertexStateUpdate("v1", VertexState.CONFIGURED));
     vertexManager.onVertexManagerEventReceived(getVMEvent(0, "v0", 0));
@@ -496,5 +496,52 @@ public class TestFairCartesianProductVertexManager {
     vertexManager.onVertexManagerEventReceived(getVMEvent(200, "v1", 0));
     verify(ctx, times(1)).reconfigureVertex(
       eq(6), any(VertexLocationHint.class), edgePropertiesCaptor.capture());
+  }
+
+  @Test(timeout = 5000)
+  public void testParallelismTwoSkewedSource() throws Exception {
+    setupDAGVertexOnly(100, 10000, 10, 10);
+    vertexManager.onVertexStateUpdated(new VertexStateUpdate("v0", VertexState.CONFIGURED));
+    vertexManager.onVertexStateUpdated(new VertexStateUpdate("v1", VertexState.CONFIGURED));
+
+    vertexManager.onVertexManagerEventReceived(getVMEvent(15000, "v0", 0));
+
+    for (int i = 0; i < 30; i++) {
+      vertexManager.onVertexManagerEventReceived(getVMEvent(1, "v1", i));
+    }
+
+    verify(ctx, times(1)).reconfigureVertex(
+      eq(99), any(VertexLocationHint.class), edgePropertiesCaptor.capture());
+    Map<String, EdgeProperty> edgeProperties = edgePropertiesCaptor.getValue();
+    verifyEdgeProperties(edgeProperties.get("v0"), new String[]{"v0", "v1"},
+      new int[]{99, 1}, 100);
+  }
+
+  @Test(timeout = 5000)
+  public void testParallelismThreeSkewedSource() throws Exception {
+    when(ctx.getInputVertexEdgeProperties()).thenReturn(getEdgePropertyMap(3));
+    setSrcParallelism(ctx, 10, 2, 3, 4);
+
+    CartesianProductConfigProto.Builder builder = CartesianProductConfigProto.newBuilder();
+    builder.setIsPartitioned(false).addSources("v0").addSources("v1").addSources("v2")
+      .setMaxParallelism(100).setMinOpsPerWorker(10000)
+      .setNumPartitionsForFairCase(10);
+    vertexManager.initialize(builder.build());
+
+    vertexManager.onVertexStateUpdated(new VertexStateUpdate("v0", VertexState.CONFIGURED));
+    vertexManager.onVertexStateUpdated(new VertexStateUpdate("v1", VertexState.CONFIGURED));
+    vertexManager.onVertexStateUpdated(new VertexStateUpdate("v2", VertexState.CONFIGURED));
+
+    vertexManager.onVertexManagerEventReceived(getVMEvent(60000, "v0", 0));
+    vertexManager.onVertexManagerEventReceived(getVMEvent(4000, "v1", 0));
+    for (int i = 0; i < 40; i++) {
+      vertexManager.onVertexManagerEventReceived(getVMEvent(3, "v2", i));
+    }
+
+    verify(ctx, times(1)).reconfigureVertex(
+      eq(93), any(VertexLocationHint.class), edgePropertiesCaptor.capture());
+    Map<String, EdgeProperty> edgeProperties = edgePropertiesCaptor.getValue();
+    verifyEdgeProperties(edgeProperties.get("v0"), new String[]{"v0", "v1", "v2"},
+      new int[]{31, 3, 1}, 100);
   }
 }

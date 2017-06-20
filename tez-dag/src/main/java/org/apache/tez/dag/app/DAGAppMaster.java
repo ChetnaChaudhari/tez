@@ -659,7 +659,7 @@ public class DAGAppMaster extends AbstractService {
       List<NamedEntityDescriptor> taskSchedulerDescriptors) {
     return new TaskSchedulerManager(context,
         clientRpcServer, dispatcher.getEventHandler(), containerSignatureMatcher, webUIService,
-        taskSchedulerDescriptors, isLocal);
+        taskSchedulerDescriptors, isLocal, hadoopShim);
   }
 
   @VisibleForTesting
@@ -861,7 +861,7 @@ public class DAGAppMaster extends AbstractService {
       DAGAppMasterEventDagCleanup cleanupEvent = (DAGAppMasterEventDagCleanup) event;
       LOG.info("Cleaning up DAG: name=" + cleanupEvent.getDag().getName() + ", with id=" +
           cleanupEvent.getDag().getID());
-      containerLauncherManager.dagComplete(cleanupEvent.getDag());
+      containerLauncherManager.dagComplete(cleanupEvent.getDag().getID(), jobTokenSecretManager);
       taskCommunicatorManager.dagComplete(cleanupEvent.getDag());
       nodes.dagComplete(cleanupEvent.getDag());
       containers.dagComplete(cleanupEvent.getDag());
@@ -1401,7 +1401,7 @@ public class DAGAppMaster extends AbstractService {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Invoked with additional local resources: " + additionalResources);
       }
-      if (dagPlan.getName().startsWith(TezConstants.TEZ_PREWARM_DAG_NAME_PREFIX)) {
+      if (!dagPlan.getName().startsWith(TezConstants.TEZ_PREWARM_DAG_NAME_PREFIX)) {
         submittedDAGs.incrementAndGet();
       }
       startDAG(dagPlan, additionalResources);

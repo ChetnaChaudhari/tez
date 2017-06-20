@@ -49,6 +49,7 @@ import org.apache.tez.common.TezUtils;
 import org.apache.tez.common.counters.TaskCounter;
 import org.apache.tez.common.counters.TezCounter;
 import org.apache.tez.common.counters.TezCounters;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.dag.api.UserPayload;
 import org.apache.tez.runtime.api.Event;
 import org.apache.tez.runtime.api.ExecutionContext;
@@ -279,6 +280,7 @@ public class TestDefaultSorter {
     try {
       sorter.flush();
       sorter.close();
+      assertTrue(sorter.isClosed());
       assertTrue(sorter.getFinalOutputFile().getParent().getName().equalsIgnoreCase(UniqueID));
       verifyCounters(sorter, context);
     } catch(Exception e) {
@@ -301,6 +303,7 @@ public class TestDefaultSorter {
     try {
       sorter.flush();
       sorter.close();
+      assertTrue(sorter.isClosed());
       assertTrue(sorter.getFinalOutputFile().getParent().getName().equalsIgnoreCase(UniqueID +
           "_0"));
       verifyCounters(sorter, context);
@@ -463,7 +466,8 @@ public class TestDefaultSorter {
     doReturn("v1").when(context).getDestinationVertexName();
     doReturn(ByteBuffer.wrap(serviceProviderMetaData.getData())).when(context)
         .getServiceProviderMetaData
-            (ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID);
+            (conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+                TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT));
     doAnswer(new Answer() {
       @Override public Object answer(InvocationOnMock invocation) throws Throwable {
         long requestedSize = (Long) invocation.getArguments()[0];

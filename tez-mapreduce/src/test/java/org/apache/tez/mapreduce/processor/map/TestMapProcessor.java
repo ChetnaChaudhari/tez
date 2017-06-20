@@ -162,7 +162,9 @@ public class TestMapProcessor {
     sharedExecutor.shutdownNow();
 
     OutputContext outputContext = task.getOutputContexts().iterator().next();
-    TezTaskOutput mapOutputs = new TezTaskOutputFiles(jobConf, outputContext.getUniqueIdentifier());
+    TezTaskOutput mapOutputs = new TezTaskOutputFiles(
+        jobConf, outputContext.getUniqueIdentifier(),
+        outputContext.getDagIdentifier());
     
     
     // TODO NEWTEZ FIXME OutputCommitter verification

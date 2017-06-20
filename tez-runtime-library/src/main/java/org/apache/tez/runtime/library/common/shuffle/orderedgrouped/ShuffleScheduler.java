@@ -54,11 +54,14 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+
 import org.apache.hadoop.io.compress.CompressionCodec;
+import org.apache.tez.dag.api.TezConfiguration;
 import org.apache.tez.http.HttpConnectionParams;
 import org.apache.tez.common.CallableWithNdc;
 import org.apache.tez.common.security.JobTokenSecretManager;
 import org.apache.tez.dag.api.TezConstants;
+import org.apache.tez.runtime.library.common.CompositeInputAttemptIdentifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -239,6 +242,7 @@ class ShuffleScheduler {
   private final float maxAllowedFailedFetchFraction;
   private final boolean checkFailedFetchSinceLastCompletion;
   private final boolean verifyDiskChecksum;
+  private final boolean compositeFetch;
 
   private volatile Thread shuffleSchedulerThread = null;
 
@@ -330,8 +334,10 @@ class ShuffleScheduler {
     this.applicationId = inputContext.getApplicationId().toString();
     this.dagId = inputContext.getDagIdentifier();
     this.localHostname = inputContext.getExecutionContext().getHostName();
+    String auxiliaryService = conf.get(TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID,
+        TezConfiguration.TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT);
     final ByteBuffer shuffleMetadata =
-        inputContext.getServiceProviderMetaData(ShuffleUtils.SHUFFLE_HANDLER_SERVICE_ID);
+        inputContext.getServiceProviderMetaData(auxiliaryService);
     this.shufflePort = ShuffleUtils.deserializeShuffleProviderMetaData(shuffleMetadata);
 
     this.referee = new Referee();
@@ -371,12 +377,18 @@ class ShuffleScheduler {
     this.httpConnectionParams = ShuffleUtils.getHttpConnectionParams(conf);
     SecretKey jobTokenSecret = ShuffleUtils
         .getJobTokenSecretFromTokenBytes(inputContext
-            .getServiceConsumerMetaData(TezConstants.TEZ_SHUFFLE_HANDLER_SERVICE_ID));
+            .getServiceConsumerMetaData(auxiliaryService));
     this.jobTokenSecretManager = new JobTokenSecretManager(jobTokenSecret);
 
-    ExecutorService fetcherRawExecutor = Executors.newFixedThreadPool(numFetchers,
-        new ThreadFactoryBuilder().setDaemon(true)
-            .setNameFormat("Fetcher_O {" + srcNameTrimmed + "} #%d").build());
+    final ExecutorService fetcherRawExecutor;
+    if (conf.getBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_FETCHER_USE_SHARED_POOL,
+        TezRuntimeConfiguration.TEZ_RUNTIME_SHUFFLE_FETCHER_USE_SHARED_POOL_DEFAULT)) {
+      fetcherRawExecutor = inputContext.createTezFrameworkExecutorService(numFetchers,
+          "Fetcher_O {" + srcNameTrimmed + "} #%d");
+    } else {
+      fetcherRawExecutor = Executors.newFixedThreadPool(numFetchers, new ThreadFactoryBuilder()
+          .setDaemon(true).setNameFormat("Fetcher_O {" + srcNameTrimmed + "} #%d").build());
+    }
     this.fetcherExecutor = MoreExecutors.listeningDecorator(fetcherRawExecutor);
 
     this.maxFailedUniqueFetches = Math.min(numberOfInputs, 5);
@@ -404,6 +416,7 @@ class ShuffleScheduler {
     this.skippedInputCounter = inputContext.getCounters().findCounter(TaskCounter.NUM_SKIPPED_INPUTS);
     this.firstEventReceived = inputContext.getCounters().findCounter(TaskCounter.FIRST_EVENT_RECEIVED);
     this.lastEventReceived = inputContext.getCounters().findCounter(TaskCounter.LAST_EVENT_RECEIVED);
+    this.compositeFetch = ShuffleUtils.isTezShuffleHandler(conf);
 
     pipelinedShuffleInfoEventsMap = Maps.newConcurrentMap();
     LOG.info("ShuffleScheduler running for sourceVertex: "
@@ -1044,13 +1057,13 @@ class ShuffleScheduler {
   public synchronized void addKnownMapOutput(String inputHostName,
                                              int port,
                                              int partitionId,
-                                             InputAttemptIdentifier srcAttempt) {
+                                             CompositeInputAttemptIdentifier srcAttempt) {
     uniqueHosts.add(new HostPort(inputHostName, port));
     HostPortPartition identifier = new HostPortPartition(inputHostName, port, partitionId);
 
     MapHost host = mapLocations.get(identifier);
     if (host == null) {
-      host = new MapHost(inputHostName, port, partitionId);
+      host = new MapHost(inputHostName, port, partitionId, srcAttempt.getInputIdentifierCount());
       mapLocations.put(identifier, host);
     }
 
@@ -1060,9 +1073,10 @@ class ShuffleScheduler {
     }
 
     host.addKnownMap(srcAttempt);
-    pathToIdentifierMap.put(
-        getIdentifierFromPathAndReduceId(srcAttempt.getPathComponent(),
-            partitionId), srcAttempt);
+    for (int i = 0; i < srcAttempt.getInputIdentifierCount(); i++) {
+      PathPartition pathPartition = new PathPartition(srcAttempt.getPathComponent(), partitionId + i);
+      pathToIdentifierMap.put(pathPartition, srcAttempt.expand(i));
+    }
 
     // Mark the host as pending
     if (host.getState() == MapHost.State.PENDING) {
@@ -1137,12 +1151,18 @@ class ShuffleScheduler {
 
   public InputAttemptIdentifier getIdentifierForFetchedOutput(
       String path, int reduceId) {
-    return pathToIdentifierMap.get(getIdentifierFromPathAndReduceId(path, reduceId));
+    return pathToIdentifierMap.get(new PathPartition(path, reduceId));
   }
   
   private synchronized boolean inputShouldBeConsumed(InputAttemptIdentifier id) {
-    return (!obsoleteInputs.contains(id) && 
-             !isInputFinished(id.getInputIdentifier()));
+    boolean isInputFinished = false;
+    if (id instanceof CompositeInputAttemptIdentifier) {
+      CompositeInputAttemptIdentifier cid = (CompositeInputAttemptIdentifier)id;
+      isInputFinished = isInputFinished(cid.getInputIdentifier(), cid.getInputIdentifier() + cid.getInputIdentifierCount());
+    } else {
+      isInputFinished = isInputFinished(id.getInputIdentifier());
+    }
+    return !obsoleteInputs.contains(id) && !isInputFinished;
   }
 
   public synchronized List<InputAttemptIdentifier> getMapsForHost(MapHost host) {
@@ -1285,11 +1305,7 @@ class ShuffleScheduler {
     }
     
   }
-  
-  private PathPartition getIdentifierFromPathAndReduceId(String path, int reduceId) {
-    return new PathPartition(path, reduceId);
-  }
-  
+
   /**
    * A thread that takes hosts off of the penalty list when the timer expires.
    */
@@ -1328,10 +1344,16 @@ class ShuffleScheduler {
       finishedMaps.set(inputIndex, true);
     }
   }
-  
+
   boolean isInputFinished(int inputIndex) {
     synchronized (finishedMaps) {
       return finishedMaps.get(inputIndex);
+    }
+  }
+
+  boolean isInputFinished(int inputIndex, int inputEnd) {
+    synchronized (finishedMaps) {
+      return finishedMaps.nextClearBit(inputIndex) > inputEnd;
     }
   }
 
@@ -1340,7 +1362,6 @@ class ShuffleScheduler {
 
     @Override
     protected Void callInternal() throws InterruptedException {
-      outer:
       while (!isShutdown.get() && remainingMaps.get() > 0) {
         synchronized (ShuffleScheduler.this) {
           if (runningFetchers.size() >= numFetchers || pendingHosts.isEmpty()) {
@@ -1436,7 +1457,7 @@ class ShuffleScheduler {
         codec, conf, localDiskFetchEnabled, localHostname, shufflePort, srcNameTrimmed, mapHost,
         ioErrsCounter, wrongLengthErrsCounter, badIdErrsCounter, wrongMapErrsCounter,
         connectionErrsCounter, wrongReduceErrsCounter, applicationId, dagId, asyncHttp, sslShuffle,
-        verifyDiskChecksum);
+        verifyDiskChecksum, compositeFetch);
   }
 
   private class FetchFutureCallback implements FutureCallback<Void> {

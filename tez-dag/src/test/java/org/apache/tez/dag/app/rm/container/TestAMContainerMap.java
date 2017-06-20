@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -45,6 +45,7 @@ import org.apache.tez.dag.app.ContainerHeartbeatHandler;
 import org.apache.tez.dag.app.TaskCommunicatorManagerInterface;
 import org.apache.tez.serviceplugins.api.ServicePluginException;
 import org.junit.Test;
+import static org.mockito.Mockito.when;
 
 public class TestAMContainerMap {
 
@@ -55,6 +56,7 @@ public class TestAMContainerMap {
     ContainerHeartbeatHandler chh = mock(ContainerHeartbeatHandler.class);
     TaskCommunicatorManagerInterface tal = mock(TaskCommunicatorManagerInterface.class);
     AppContext appContext = mock(AppContext.class);
+    when(appContext.getAMConf()).thenReturn(new Configuration());
 
 
 
@@ -143,7 +145,7 @@ public class TestAMContainerMap {
                                   TaskCommunicatorManagerInterface tal,
                                   ContainerSignatureMatcher signatureMatcher,
                                   AppContext appContext, int schedulerId,
-                                  int launcherId, int taskCommId) {
+                                  int launcherId, int taskCommId, String auxiliaryService) {
       return wrappedContainers[container.getId().getId()].amContainer;
     }
 

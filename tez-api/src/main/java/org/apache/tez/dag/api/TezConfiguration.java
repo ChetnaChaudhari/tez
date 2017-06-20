@@ -141,6 +141,16 @@ public class TezConfiguration extends Configuration {
   public static final boolean TEZ_AM_STAGING_SCRATCH_DATA_AUTO_DELETE_DEFAULT = true;
 
   /**
+   * String value. Specifies the name of the shuffle auxiliary service.
+   */
+  @ConfigurationScope(Scope.AM)
+  @ConfigurationProperty
+  public static final String TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID = TEZ_AM_PREFIX +
+      "shuffle.auxiliary-service.id";
+  public static final String TEZ_AM_SHUFFLE_AUXILIARY_SERVICE_ID_DEFAULT =
+      TezConstants.TEZ_SHUFFLE_HANDLER_SERVICE_ID;
+
+  /**
    * String value. Specifies a directory where Tez can create temporary job artifacts.
    */
   @ConfigurationScope(Scope.AM)
@@ -662,7 +672,24 @@ public class TezConfiguration extends Configuration {
   public static final String TEZ_AM_RESOURCE_CPU_VCORES = TEZ_AM_PREFIX
       + "resource.cpu.vcores";
   public static final int TEZ_AM_RESOURCE_CPU_VCORES_DEFAULT = 1;
-  
+
+  /** Boolean value. Instructs AM to delete Dag directory upon completion */
+  @ConfigurationScope(Scope.AM)
+  @ConfigurationProperty(type="boolean")
+  public static final String TEZ_AM_DAG_CLEANUP_ON_COMPLETION = TEZ_AM_PREFIX
+      + "dag.cleanup.on.completion";
+  public static final boolean TEZ_AM_DAG_CLEANUP_ON_COMPLETION_DEFAULT = false;
+
+  /**
+   * Int value. Upper limit on the number of threads used to delete DAG directories on nodes.
+   */
+  @ConfigurationScope(Scope.AM)
+  @ConfigurationProperty(type="integer")
+  public static final String TEZ_AM_DAG_CLEANUP_THREAD_COUNT_LIMIT =
+      TEZ_AM_PREFIX + "dag.deletion.thread-count-limit";
+
+  public static final int TEZ_AM_DAG_CLEANUP_THREAD_COUNT_LIMIT_DEFAULT = 10;
+
   /** Int value. The amount of memory in MB to be used by tasks. This applies to all tasks across
    * all vertices. Setting it to the same value for all tasks is helpful for container reuse and 
    * thus good for performance typically. */
@@ -1739,6 +1766,18 @@ public class TezConfiguration extends Configuration {
       TEZ_PREFIX + "test.recovery-service-class";
   @Private
   public static final String TEZ_AM_RECOVERY_SERVICE_CLASS_DEFAULT = "org.apache.tez.dag.history.recovery.RecoveryService";
+
+  /**
+   * String value that is a class name.
+   * Specify the class to use for Deletion tracking.
+   */
+  @ConfigurationScope(Scope.AM)
+  @ConfigurationProperty
+  public static final String TEZ_AM_DELETION_TRACKER_CLASS =
+      TEZ_AM_PREFIX + "deletion.tracker.class";
+
+  public static final String TEZ_AM_DELETION_TRACKER_CLASS_DEFAULT =
+      "org.apache.tez.dag.app.launcher.DeletionTrackerImpl";
 
   /**
    * Boolean value. Default false.
