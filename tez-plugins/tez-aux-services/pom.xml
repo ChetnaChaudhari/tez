@@ -20,7 +20,7 @@
   <parent>
     <artifactId>tez-plugins</artifactId>
     <groupId>org.apache.tez</groupId>
-    <version>0.9.0-SNAPSHOT</version>
+    <version>0.9.1-SNAPSHOT</version>
   </parent>
 
   <artifactId>tez-aux-services</artifactId>
@@ -205,6 +205,13 @@
                     <exclude>META-INF/*.SF</exclude>
                     <exclude>META-INF/*.DSA</exclude>
                     <exclude>META-INF/*.RSA</exclude>
+                  </excludes>
+                </filter>
+                <!-- Remove SecurityInfo to avoid loading DAGClientSecurityInfo which can break daemon(RM,NM etc.) start up -->
+                <filter>
+                  <artifact>org.apache.tez:tez-api</artifact>
+                  <excludes>
+                    <exclude>META-INF/services/org.apache.hadoop.security.SecurityInfo</exclude>
                   </excludes>
                 </filter>
               </filters>

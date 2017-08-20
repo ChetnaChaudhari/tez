@@ -58,6 +58,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.anyListOf;
 import static org.mockito.Mockito.atLeastOnce;
@@ -175,9 +176,63 @@ public class TestPipelinedSorter {
     // final merge is disabled. Final output file would not be populated in this case.
     assertTrue(sorter.finalOutputFile == null);
     TezCounter numShuffleChunks = outputContext.getCounters().findCounter(TaskCounter.SHUFFLE_CHUNK_COUNT);
-    assertTrue(sorter.getNumSpills() == numShuffleChunks.getValue());
+//    assertTrue(sorter.getNumSpills() == numShuffleChunks.getValue());
     conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
 
+  }
+
+  @Test
+  public void testEmptyPartitionsTwoSpillsNoEmptyEvents() throws Exception {
+    testEmptyPartitionsHelper(2, false);
+  }
+
+  @Test
+  public void testEmptyPartitionsTwoSpillsWithEmptyEvents() throws Exception {
+    testEmptyPartitionsHelper(2, true);
+  }
+
+  @Test
+  public void testEmptyPartitionsNoSpillsNoEmptyEvents() throws Exception {
+    testEmptyPartitionsHelper(0, false);
+  }
+
+  @Test
+  public void testEmptyPartitionsNoSpillsWithEmptyEvents() throws Exception {
+    testEmptyPartitionsHelper(0, true);
+  }
+
+  public void testEmptyPartitionsHelper(int numKeys, boolean sendEmptyPartitionDetails) throws IOException, InterruptedException {
+    int partitions = 50;
+    this.numOutputs = partitions;
+    this.initialAvailableMem = 1 *1024 * 1024;
+    Configuration conf = getConf();
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_EMPTY_PARTITION_INFO_VIA_EVENTS_ENABLED, sendEmptyPartitionDetails);
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
+    conf.setInt(TezRuntimeConfiguration
+        .TEZ_RUNTIME_PIPELINED_SORTER_MIN_BLOCK_SIZE_IN_MB, 1);
+    PipelinedSorter sorter = new PipelinedSorter(this.outputContext, conf, partitions,
+        initialAvailableMem);
+
+    writeData(sorter, numKeys, 1000000);
+    if (numKeys == 0) {
+      assertTrue(sorter.getNumSpills() == 1);
+    } else {
+      assertTrue(sorter.getNumSpills() == numKeys + 1);
+    }
+    verifyCounters(sorter, outputContext);
+    Path indexFile = sorter.getFinalIndexFile();
+    TezSpillRecord spillRecord = new TezSpillRecord(indexFile, conf);
+    for (int i = 0; i < partitions; i++) {
+      TezIndexRecord tezIndexRecord = spillRecord.getIndex(i);
+      if (tezIndexRecord.hasData()) {
+        continue;
+      }
+      if (sendEmptyPartitionDetails) {
+        Assert.assertEquals("Unexpected raw length for " + i + "th partition", 0, tezIndexRecord.getRawLength());
+      } else {
+        Assert.assertEquals("Unexpected raw length for " + i + "th partition", 6, tezIndexRecord.getRawLength());
+      }
+    }
   }
 
   @Test
@@ -367,6 +422,38 @@ public class TestPipelinedSorter {
     verifyCounters(sorter, outputContext);
   }
 
+  @Test
+  public void testMultipleSpills() throws IOException {
+    Configuration conf = getConf();
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
+    this.numOutputs = 5;
+    this.initialAvailableMem = 5 * 1024 * 1024;
+    conf.setInt(TezRuntimeConfiguration
+        .TEZ_RUNTIME_PIPELINED_SORTER_MIN_BLOCK_SIZE_IN_MB, 3);
+    PipelinedSorter sorter = new PipelinedSorter(this.outputContext, conf, numOutputs,
+        initialAvailableMem);
+
+    writeData(sorter, 25000, 1000);
+    assertFalse("Expecting needsRLE to be false", sorter.needsRLE());
+    verifyCounters(sorter, outputContext);
+  }
+
+  @Test
+  public void testMultipleSpills_WithRLE() throws IOException {
+    Configuration conf = getConf();
+    conf.setBoolean(TezRuntimeConfiguration.TEZ_RUNTIME_ENABLE_FINAL_MERGE_IN_OUTPUT, true);
+    this.numOutputs = 5;
+    this.initialAvailableMem = 5 * 1024 * 1024;
+    conf.setInt(TezRuntimeConfiguration
+        .TEZ_RUNTIME_PIPELINED_SORTER_MIN_BLOCK_SIZE_IN_MB, 3);
+    PipelinedSorter sorter = new PipelinedSorter(this.outputContext, conf, numOutputs,
+        initialAvailableMem);
+
+    writeSimilarKeys(sorter, 25000, 1000, true);
+    assertTrue("Expecting needsRLE to be true", sorter.needsRLE());
+    verifyCounters(sorter, outputContext);
+  }
+
   public void basicTest2(int partitions, int[] numkeys, int[] keysize,
       long initialAvailableMem, int  blockSize) throws IOException {
     this.numOutputs = partitions; // single output
@@ -419,10 +506,14 @@ public class TestPipelinedSorter {
     verifyCounters(sorter, outputContext);
     Path outputFile = sorter.finalOutputFile;
     FileSystem fs = outputFile.getFileSystem(conf);
-    IFile.Reader reader = new IFile.Reader(fs, outputFile, null, null, null, false, -1, 4096);
+    TezCounter finalOutputBytes =
+        outputContext.getCounters().findCounter(TaskCounter.OUTPUT_BYTES_PHYSICAL);
+    if (finalOutputBytes.getValue() > 0) {
+      IFile.Reader reader = new IFile.Reader(fs, outputFile, null, null, null, false, -1, 4096);
+      verifyData(reader);
+      reader.close();
+    }
     //Verify dataset
-    verifyData(reader);
-    reader.close();
     verify(outputContext, atLeastOnce()).notifyProgress();
   }
 
@@ -453,11 +544,11 @@ public class TestPipelinedSorter {
 
     TezCounter finalOutputBytes =
         context.getCounters().findCounter(TaskCounter.OUTPUT_BYTES_PHYSICAL);
-    assertTrue(finalOutputBytes.getValue() > 0);
+    assertTrue(finalOutputBytes.getValue() >= 0);
 
     TezCounter outputBytesWithOverheadCounter = context.getCounters().findCounter
         (TaskCounter.OUTPUT_BYTES_WITH_OVERHEAD);
-    assertTrue(outputBytesWithOverheadCounter.getValue() > 0);
+    assertTrue(outputBytesWithOverheadCounter.getValue() >= 0);
   }
 
 
@@ -702,6 +793,25 @@ public class TestPipelinedSorter {
 
   private void writeData(ExternalSorter sorter, int numKeys, int keyLen) throws IOException {
     writeData(sorter, numKeys, keyLen, true);
+  }
+
+  // duplicate some of the keys
+  private void writeSimilarKeys(ExternalSorter sorter, int numKeys, int keyLen,
+      boolean autoClose) throws IOException {
+    sortedDataMap.clear();
+    String keyStr = RandomStringUtils.randomAlphanumeric(keyLen);
+    for (int i = 0; i < numKeys; i++) {
+      if (i % 4 == 0) {
+        keyStr = RandomStringUtils.randomAlphanumeric(keyLen);
+      }
+      Text key = new Text(keyStr);
+      Text value = new Text(RandomStringUtils.randomAlphanumeric(keyLen));
+      sorter.write(key, value);
+      sortedDataMap.put(key.toString(), value.toString()); //for verifying data later
+    }
+    if (autoClose) {
+      closeSorter(sorter);
+    }
   }
 
   private void writeData(ExternalSorter sorter, int numKeys, int keyLen,

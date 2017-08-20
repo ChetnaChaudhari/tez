@@ -728,11 +728,7 @@ class ShuffleScheduler {
   @VisibleForTesting
   void killSelf(Exception exception, String message) {
     LOG.error(message, exception);
-    try {
-      this.close();
-    } finally {
-      this.inputContext.killSelf(exception, message);
-    }
+    exceptionReporter.killSelf(exception, message);
   }
 
   private final AtomicInteger nextProgressLineEventCount = new AtomicInteger(0);
@@ -1124,7 +1120,7 @@ class ShuffleScheduler {
       if (LOG.isDebugEnabled()) {
         LOG.debug("PendingHosts=" + pendingHosts);
       }
-      wait();
+      waitAndNotifyProgress();
     }
 
     if (!pendingHosts.isEmpty()) {
@@ -1364,19 +1360,19 @@ class ShuffleScheduler {
     protected Void callInternal() throws InterruptedException {
       while (!isShutdown.get() && remainingMaps.get() > 0) {
         synchronized (ShuffleScheduler.this) {
-          if (runningFetchers.size() >= numFetchers || pendingHosts.isEmpty()) {
-            if (remainingMaps.get() > 0) {
-              try {
-                ShuffleScheduler.this.wait();
-              } catch (InterruptedException e) {
-                if (isShutdown.get()) {
-                  LOG.info(srcNameTrimmed + ": " +
-                      "Interrupted while waiting for fetchers to complete and hasBeenShutdown. Breaking out of ShuffleSchedulerCallable loop");
-                  Thread.currentThread().interrupt();
-                  break;
-                } else {
-                  throw e;
-                }
+          while ((runningFetchers.size() >= numFetchers || pendingHosts.isEmpty())
+              && remainingMaps.get() > 0) {
+            try {
+              waitAndNotifyProgress();
+            } catch (InterruptedException e) {
+              if (isShutdown.get()) {
+                LOG.info(srcNameTrimmed + ": " +
+                    "Interrupted while waiting for fetchers to complete" +
+                    "and hasBeenShutdown. Breaking out of ShuffleSchedulerCallable loop");
+                Thread.currentThread().interrupt();
+                break;
+              } else {
+                throw e;
               }
             }
           }
@@ -1448,6 +1444,11 @@ class ShuffleScheduler {
       }
       return null;
     }
+  }
+
+  private synchronized void waitAndNotifyProgress() throws InterruptedException {
+      inputContext.notifyProgress();
+      wait(1000);
   }
 
   @VisibleForTesting
